@@ -8,6 +8,31 @@ sudo apt install libpq-dev
 sudo apt install libxcb*dev
 sudo apt install libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon0
 
+#或者yum安装
+yum install -y autoconf automake libtool make gcc gcc-c++ pkgconfig texinfo
+yum install mesa-libGL-devel mesa-libEGL-devel mesa-libGLU-devel
+yum install libxcb-devel xcb-util-devel xcb-util-image-devel xcb-util-keysyms-devel xcb-util-renderutil-devel xcb-util-wm-devel
+yum install libX11-devel libXrender-devel libXi-devel libXext-devel libXfixes-devel libXrandr-devel libXcursor-devel libXinerama-devel libXcomposite-devel libdrm-devel
+yum install libxkbcommon-devel libxkbcommon-x11-devel
+yum install libinput-devel libudev-devel 
+yum install compat-openssl10-devel
+yum install fontconfig-devel
+yum install libffi-devel
+yum install libsecret-devel
+yum install sqlite-devel
+yum install bison flex pcre2-devel
+
+#编译过程中，需要prel
+yum install -y perl
+
+: << 'EOF'
+# 如果需要网络，可以设置代理
+export http_proxy=http://172.16.50.112:7890
+export https_proxy=http://172.16.50.112:7890
+export HTTP_PROXY=http://172.16.50.112:7890
+export HTTPS_PROXY=http://172.16.50.112:7890
+EOF
+
 # iconv编码转换
 iconv -l | grep GBK	#是否支持GBK
 iconv -f GBK -t UTF-8 broken.txt -o fixed.txt	#转UTF-8
@@ -18,8 +43,8 @@ iconv -f GBK -t UTF-8 broken.txt -o fixed.txt	#转UTF-8
 #SSL, 需要-openssl-linked 静态连接到ssl库？还是-openssl动态连接？
 # 如果系统库里有，可以直接连接系统库
 #./config enable-shared --prefix=$HOME/Qt/openssl --openssldir=$HOME/Qt/openssl
-#-openssl OPENSSL_INCDIR="$HOME/openssl/include" OPENSSL_LIBDIR="$HOME/openssl/lib"
-export LD_LIBRARY_PATH=$HOME/openssl/lib:$LD_LIBRARY_PATH
+#-openssl OPENSSL_INCDIR="$HOME/Qt/openssl/include" OPENSSL_LIBDIR="$HOME/Qt/openssl/lib"
+export LD_LIBRARY_PATH=$HOME/Qt/openssl/lib:$LD_LIBRARY_PATH
 
 #最好带上-qt-libpng，使用源码内置png库，否则遇到系统png版本太低，就惨了
 
