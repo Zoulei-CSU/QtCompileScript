@@ -3,10 +3,24 @@
 sudo apt install build-essential cmake
 sudo apt install libgl1-mesa-dev  libglu1-mesa-dev
 sudo apt install libegl1-mesa-dev
+
+# Postgres数据库支持
 sudo apt install libpq-dev
 
+# xcb相关
 sudo apt install libxcb*dev
 sudo apt install libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon0
+sudo apt install libxext-dev libx11-dev libx11-xcb-dev '^libxcb.*-dev'
+
+# fontconfig和iconv
+sudo apt install libfontconfig-dev libiconv-hook-dev
+
+# Vulkan支持
+sudo apt install libvulkan-dev glslc spirv-headers
+
+# Wayland支持
+sudo apt install libwayland-dev libwayland-egl-backend-dev
+
 
 #或者yum安装
 yum install -y autoconf automake libtool make gcc gcc-c++ pkgconfig texinfo
