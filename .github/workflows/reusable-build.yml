@@ -1,7 +1,7 @@
 # =============================================================================
 # reusable-build.yml —— Qt 编译核心复用工作流
 #
-# 由 qt5.yml / qt6.yml / qt5-centos7.yml 通过 workflow_call 调用。
+# 由 qt5-modern.yml / qt6-modern.yml / qt5-legacy.yml 通过 workflow_call 调用。
 # 不直接暴露给用户，避免参数面板分散。
 #
 # 职责：
@@ -116,20 +116,20 @@ on:
         type: boolean
         default: false
       use_container:
-        description: "是否在容器内构建（CentOS7 兼容场景）"
+        description: "是否在容器内构建（老系统兼容场景）"
         required: false
         type: boolean
         default: false
       container_image:
-        description: "容器镜像"
+        description: "容器镜像（老系统线，glibc 2.28）"
         required: false
         type: string
-        default: "centos:7"
+        default: "almalinux:8"
       devtoolset:
-        description: "devtoolset 版本（CentOS7 用），例如 devtoolset-9"
+        description: "GCC toolset 版本（容器内用），例如 gcc-toolset-11"
         required: false
         type: string
-        default: "devtoolset-9"
+        default: "gcc-toolset-11"
       timeout_minutes:
         description: "单 job 超时时间（分钟），留 10 分钟余量给上传"
         required: false
@@ -236,15 +236,15 @@ jobs:
           # ---- Linux 线一致性检查 ----
           if [[ "${{ inputs.os }}" == "linux" ]]; then
             if [[ "${{ inputs.use_container }}" == "true" && "${{ inputs.enable_wayland }}" == "true" ]]; then
-              echo "::warning title=Wayland 不可用::容器（CentOS7/glibc 2.17）内没有 libwayland-devel，无法启用 Wayland。将自动强制关闭 Wayland。"
+              echo "::warning title=Wayland 保持关闭::老系统（glibc 2.28 基线）线固定关闭 Wayland，以保证产物在无 Wayland 的服务器/国产系统上稳定。将强制关闭。"
               WARN=$((WARN+1))
             fi
             if [[ "${{ inputs.use_container }}" == "true" && "${{ inputs.use_system_png }}" == "true" ]]; then
-              echo "::warning title=libpng 版本风险::老系统（CentOS7）系统 libpng 版本过旧，建议使用内置 libpng（use_system_png=false / -qt-libpng）。将自动回退为内置。"
+              echo "::warning title=libpng 版本风险::老系统线为最大兼容性使用内置 libpng（use_system_png=false / -qt-libpng）。将自动回退为内置。"
               WARN=$((WARN+1))
             fi
             if [[ "${{ inputs.qt_major }}" == "6" && "${{ inputs.use_container }}" == "true" ]]; then
-              echo "::error title=系统不兼容::Qt6 要求 OpenSSL 1.1.1+，而 CentOS7 只有 OpenSSL 1.0.2k；且 Qt6 需要更新的编译器。CentOS7 线只支持 Qt5。"
+              echo "::error title=暂不支持::Qt6 老系统线尚未启用（需配 gcc-toolset 且版本组合需单独验证）。本线目前只支持 Qt5。"
             fi
           fi
 
@@ -263,23 +263,27 @@ jobs:
             echo "参数校验通过，未发现明显风险组合。"
           fi
 
-      - name: 容器基础准备 (CentOS7)
+      - name: 容器基础准备 (老系统线)
         if: ${{ inputs.use_container }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "::group::切换 yum 源到 vault (CentOS7 已 EOL)"
-          # CentOS7 已于 2024-06 EOL，官方 mirrorlist 失效，必须指向 vault
-          sed -i -e 's|^mirrorlist=|#mirrorlist=|g' \
-            -e 's|^#baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=http://vault.centos.org/centos/7|g' \
-            /etc/yum.repos.d/CentOS-*.repo || true
-          sed -i 's|^mirrorlist|#mirrorlist|g; s|^#\?baseurl=.*|baseurl=http://vault.centos.org/centos/7/os/$basearch/|g' \
-            /etc/yum.repos.d/CentOS-Base.repo || true
-          yum clean all || true
+          # 基础镜像：AlmaLinux 8（glibc 2.28）。
+          #   为何不用 CentOS7：CentOS7 是 glibc 2.17，而 GitHub Actions 自带的
+          #   Node.js（v20/v24，/__e/nodeXX/bin/node）要求 glibc >= 2.27/2.28，
+          #   导致 actions/checkout、actions/cache、actions/upload-artifact 等所有
+          #   Node-based action 在 CentOS7 容器内直接起不来（CXXABI/GLIBC not found）。
+          #   AlmaLinux 8 有 glibc 2.28，既能跑这些 action，产物兼容面又远宽于
+          #   Ubuntu 22.04（2.35），覆盖 Debian10+/Ubuntu18.10+/RHEL8+。
+          echo "::group::系统信息"
+          cat /etc/os-release | head -3
+          ldd --version | head -1
           echo "::endgroup::"
 
           echo "::group::安装容器基础工具"
-          yum install -y git which tar xz wget ca-certificates || true
+          # AlmaLinux 8 官方源仍在线（EOL 2029），无需切 vault
+          dnf install -y --setopt=install_weak_deps=False \
+            git which tar xz wget ca-certificates dnf-plugins-core || true
           echo "::endgroup::"
 
       # =======================================================================
@@ -374,20 +378,17 @@ jobs:
               echo "clang: $(clang --version | head -n1)";;
           esac
 
-      - name: 安装依赖 (CentOS7 容器)
+      - name: 安装依赖 (老系统容器)
         if: ${{ inputs.use_container }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "::group::yum install (CentOS7 + SCL)"
-          yum install -y centos-release-scl || true
-          # SCL 源指向 vault
-          sed -i 's|^mirrorlist=|#mirrorlist=|g; s|^#\?baseurl=.*|baseurl=http://vault.centos.org/centos/7/sclo/$basearch/sclo/|g' \
-            /etc/yum.repos.d/CentOS-SCLo-scl*.repo 2>/dev/null || true
-          yum clean all || true
-
-          yum install -y "${{ inputs.devtoolset }}" \
-            make cmake3 perl python3 which \
+          echo "::group::dnf install (AlmaLinux 8 + gcc-toolset)"
+          # AlmaLinux 8 用 dnf；gcc-toolset 等价于 CentOS7 的 devtoolset，
+          # 通过 scl enable 激活（与原来一致的用法）。
+          dnf install -y --setopt=install_weak_deps=False \
+            "${{ inputs.devtoolset }}" \
+            make cmake ninja-build perl python3 which \
             mesa-libGL-devel mesa-libEGL-devel \
             libxcb-devel xcb-util-devel xcb-util-image-devel xcb-util-keysyms-devel \
             xcb-util-renderutil-devel xcb-util-wm-devel \
@@ -399,10 +400,17 @@ jobs:
             bison flex pcre2-devel openssl-devel \
             postgresql-devel \
             libdbusmenu-devel
-          echo "devtoolset: ${{ inputs.devtoolset }} 安装完成"
+          echo "toolset: ${{ inputs.devtoolset }} 安装完成"
           echo ""
-          echo "说明：CentOS7 无法安装 libwayland-devel（base 源缺失），"
-          echo "      因此本线固定关闭 Wayland；libpng 使用源码内置版本。"
+
+          # Wayland 依赖：AlmaLinux 8 的 AppStream 里有 libwayland-devel。
+          # 本线固定关闭 Wayland，但预装以便将来开启时不改流水线；装失败不阻塞。
+          if dnf install -y --setopt=install_weak_deps=False \
+               libwayland-client-devel libwayland-server-devel 2>/dev/null; then
+            echo "（可选）libwayland-devel 已就绪（本线暂未启用 Wayland）"
+          else
+            echo "（可选）libwayland-devel 未安装，不影响本线（Wayland 固定关闭）"
+          fi
           echo "::endgroup::"
 
       - name: 安装依赖 (macOS)
@@ -592,7 +600,7 @@ jobs:
           QT_SOURCE_PACKAGE: ${{ inputs.source_package }}
           QT_SKIP_MODULES: ${{ inputs.skip_modules }}
         run: |
-          # CentOS7 容器内需要先启用 devtoolset
+          # 老系统容器内需要先启用 gcc-toolset（等价 CentOS7 的 devtoolset）
           if [[ "${{ inputs.use_container }}" == "true" ]]; then
             echo "启用 ${{ inputs.devtoolset }} ..."
             scl enable ${{ inputs.devtoolset }} -- bash .github/scripts/build-qt.sh
@@ -625,10 +633,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 平台后缀，CentOS7 场景加上 glibc 标识
+          # 平台后缀，老系统容器线加上 glibc 标识
           SUFFIX="${{ inputs.compiler }}"
           if [[ "${{ inputs.os }}" == "linux" && "${{ inputs.use_container }}" == "true" ]]; then
-            SUFFIX="${SUFFIX}-glibc217"
+            SUFFIX="${SUFFIX}-glibc228"
           fi
           if [[ "${{ inputs.os }}" == "linux" && "${{ inputs.qt_major }}" == "5" ]]; then
             # 区分 Linux Qt5 老系统线 / 新系统线

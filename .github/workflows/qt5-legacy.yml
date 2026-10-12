@@ -1,25 +1,34 @@
 # =============================================================================
-# qt5-legacy.yml —— Qt5 老系统线（CentOS7 / glibc 2.17）
+# qt5-legacy.yml —— Qt5 老系统线（AlmaLinux 8 / glibc 2.28）
 #
 # 使用场景：
-#   需要产物能在 CentOS7 / 麒麟 / 统信等老 glibc（2.17）系统上运行。
-#   直接在 ubuntu-22.04 上编译出来的 Qt 依赖 glibc 2.35+，在老系统跑不起来。
-#   所以这里用 centos:7 容器 + devtoolset 编译，保证 glibc 2.17 兼容。
+#   需要产物能在较老的 glibc（2.28）系统上运行，覆盖
+#     Debian 10+ / Ubuntu 18.10+ / Fedora 29+ / RHEL 8+ / CentOS 8+ 等。
+#   直接在 ubuntu-22.04 上编译出来的 Qt 依赖 glibc 2.35+，兼容面更窄。
+#   本线用 almalinux:8 容器 + gcc-toolset 编译，保证 glibc 2.28 兼容。
 #
-# 本线固定策略（不可通过参数改变，均为老系统硬约束）：
+# ⚠️ 为什么不再用 CentOS7（glibc 2.17）：
+#   GitHub Actions 已把 Node20-based action 强制跑在 Node.js 24 上，
+#   而 Node 24 要求 glibc >= 2.27/2.28。CentOS7 只有 glibc 2.17，
+#   导致 actions/checkout、actions/cache、actions/upload-artifact 等
+#   所有 Node-based action 在容器内直接起不来（CXXABI/GLIBC not found）。
+#   该组合无解（Node 官方无 glibc-217 的 Node 24 构建），业界（PyTorch/
+#   NumPy/manylinux）均已放弃 CentOS7/AL2，改用 glibc 2.28 基础镜像。
+#   故本线基线从 glibc 2.17 上移到 2.28。
+#
+# 本线固定策略（均为老系统硬约束）：
 #   - 源码包：qt-everywhere（全量，含 qtwayland 模块但被 skip）
-#   - Wayland：关闭（CentOS7 base 源无 libwayland-devel）
-#   - libpng：源码内置（-qt-libpng，老系统 libpng 过旧）
+#   - Wayland：关闭（保持最大兼容；AlmaLinux 8 虽有 libwayland-devel 但不启用）
+#   - libpng：源码内置（-qt-libpng）
 #   - iconv：启用；ICU：关闭（-iconv -no-icu）
 #   - 始终启用：openssl-linked / libpq(psql) / fontconfig / xcb / opengl desktop
 #   - 输出：strip + tar.xz
 #
 # 注意：
-#   - CentOS7 已于 2024-06 EOL，yum 源需指向 vault.centos.org（脚本内已处理）
 #   - 容器内编译无法用 Actions Cache 的 ccache（路径隔离），故 ccache 默认关闭
-#   - CentOS7 只有 OpenSSL 1.0.2k，Qt6 要求 1.1.1+，因此本线只编译 Qt5
+#   - 本线只编译 Qt5（Qt6 老系统线尚未启用，需单独验证 gcc-toolset 组合）
 # =============================================================================
-name: Qt5 Build (Legacy / CentOS7 glibc2.17)
+name: Qt5 Build (Legacy / AlmaLinux8 glibc2.28)
 
 on:
   workflow_dispatch:
@@ -37,15 +46,16 @@ on:
           - "5.15.2"
 
       devtoolset:
-        description: "devtoolset 版本（决定 GCC 版本）"
+        description: "GCC toolset 版本（决定 GCC 版本）"
         required: true
         type: choice
-        default: "devtoolset-9"
+        default: "gcc-toolset-11"
         options:
-          - "devtoolset-9"
-          - "devtoolset-10"
-          - "devtoolset-11"
-          - "devtoolset-7"
+          - "gcc-toolset-9"
+          - "gcc-toolset-10"
+          - "gcc-toolset-11"
+          - "gcc-toolset-12"
+          - "gcc-toolset-13"
 
       arch:
         description: "目标架构"
@@ -126,9 +136,9 @@ jobs:
     with:
       qt_major: "5"
       qt_version: ${{ inputs.qt_version }}
-      # 平台标识用 linux-centos7-<devtoolset>，便于后缀命名与参数生成分支识别
+      # 平台标识用 linux-almalinux8-<toolset>，便于后缀命名与参数生成分支识别
       os: "linux"
-      compiler: "centos7-${{ inputs.devtoolset }}"
+      compiler: "almalinux8-${{ inputs.devtoolset }}"
       arch: ${{ inputs.arch }}
       build_type: ${{ inputs.build_type }}
       # 全量 qt-everywhere
@@ -149,6 +159,6 @@ jobs:
       release_tag: ${{ inputs.release_tag }}
       prerelease: ${{ inputs.prerelease }}
       use_container: true
-      container_image: "centos:7"
+      container_image: "almalinux:8"
       devtoolset: ${{ inputs.devtoolset }}
       timeout_minutes: 350

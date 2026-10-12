@@ -13,7 +13,7 @@
    | 工作流 | 用途 |
    |---|---|
    | **Qt5 Build (Modern)** | 编译 Qt5，支持 Linux(新系统) / Windows / macOS |
-   | **Qt5 Build (Legacy / CentOS7 glibc2.17)** | 编译可在老系统（麒麟/统信等）运行的 Qt5 产物 |
+   | **Qt5 Build (Legacy / AlmaLinux8 glibc2.28)** | 编译可在老系统（麒麟/统信/RHEL8 等）运行的 Qt5 产物 |
    | **Qt6 Build (Modern)** | 编译 Qt6（6.8 LTS），CMake 构建体系 |
 
 3. 点击右侧 **Run workflow** 按钮，在弹出面板中选择参数
@@ -75,20 +75,27 @@
 
 Linux 编译按「系统新旧」分流，入口工作流已把差异固化，无需手工调参：
 
-| | **Legacy / CentOS7** | **Modern (Qt5)** | **Modern (Qt6)** |
+| | **Legacy / AlmaLinux8** | **Modern (Qt5)** | **Modern (Qt6)** |
 |---|---|---|---|
-| Runner | `centos:7` 容器 | `ubuntu-22.04` | `ubuntu-22.04` |
-| glibc | 2.17（老系统兼容） | 2.35+ | 2.35+ |
-| 编译器 | devtoolset-7/9/10/11 | gcc / clang | gcc / clang |
+| Runner | `almalinux:8` 容器 | `ubuntu-22.04` | `ubuntu-22.04` |
+| glibc | 2.28（老系统兼容） | 2.35+ | 2.35+ |
+| 编译器 | gcc-toolset-9/10/11/12/13 | gcc / clang | gcc / clang |
 | libpng | **内置** `-qt-libpng` | 系统 `-system-libpng` | 系统 `-system-libpng` |
-| Wayland | **关闭**（无 libwayland-devel） | **开启**（qtwayland 模块） | **开启** `-feature-wayland` |
+| Wayland | **关闭**（保持最大兼容） | **开启**（qtwayland 模块） | **开启** `-feature-wayland` |
 | iconv | `-iconv` 启用 | `-iconv` 启用 | Qt6 内置，无需开关 |
 | ICU | `-no-icu` | `-no-icu` | `-no-icu` |
 | OpenSSL | `-openssl-linked` | `-openssl-linked` | `-openssl-linked` |
 | libpq | `-sql-psql` | `-sql-psql` | `-sql-psql` |
 | fontconfig | 自动检测（构建后校验） | 自动检测（构建后校验） | 自动检测（构建后校验） |
 
-> CentOS7 只有 OpenSSL 1.0.2k，而 Qt6 要求 1.1.1+，因此 **Legacy 线只编译 Qt5**。
+> ⚠️ **为何基线是 glibc 2.28 而非 2.17**：GitHub Actions 已把 Node20-based action
+> 强制跑在 Node.js 24 上，而 Node 24 要求 glibc ≥ 2.27/2.28。CentOS7（glibc 2.17）
+> 内 `actions/checkout`、`actions/cache`、`actions/upload-artifact` 等全部起不来
+> （`CXXABI_1.3.9` / `GLIBC_2.27 not found`）。该组合无解，业界（PyTorch/NumPy/
+> manylinux）均已放弃 CentOS7/AL2。因此本线基线上移到 **glibc 2.28**：
+> 覆盖 Debian 10+ / Ubuntu 18.10+ / Fedora 29+ / RHEL 8+ / CentOS 8+。
+>
+> Legacy 线只编译 Qt5（Qt6 老系统线尚未启用，需单独验证 gcc-toolset 组合）。
 > Qt6 的 GBK/GB18030 中文编码由 `qt5compat` 模块提供，脚本会自动保证其不被 skip。
 
 构建完成后会解析 `config.summary` 核对上述硬需求是否真的启用了，
@@ -113,13 +120,13 @@ Linux 编译按「系统新旧」分流，入口工作流已把差异固化，�
 ## 五、产物命名
 
 ```
-Qt-<版本>-<系统>-<编译器>[-glibc217][-legacy|-modern][-arm64][-static]-<构建类型>.tar.xz|.tar.gz|.zip
+Qt-<版本>-<系统>-<编译器>[-glibc228][-legacy|-modern][-arm64][-static]-<构建类型>.tar.xz|.tar.gz|.zip
 ```
 
 示例：
 ```
 Qt-5.15.17-linux-gcc-modern-release.tar.xz
-Qt-5.15.17-linux-centos7-devtoolset-9-glibc217-legacy-release.tar.xz
+Qt-5.15.17-linux-almalinux8-gcc-toolset-11-glibc228-legacy-release.tar.xz
 Qt-5.15.17-windows-msvc2022-release.zip
 Qt-6.8.3-macos-clang-arm64-release.tar.gz
 ```
@@ -159,7 +166,7 @@ bash .github/scripts/print-host-info.sh
 .github/
 ├── workflows/
 │   ├── qt5-modern.yml       # Qt5 新系统线入口（Linux 新系统 / Windows / macOS）
-│   ├── qt5-legacy.yml       # Qt5 老系统线入口（CentOS7 / glibc 2.17）
+│   ├── qt5-legacy.yml       # Qt5 老系统线入口（AlmaLinux8 / glibc 2.28）
 │   ├── qt6-modern.yml       # Qt6 新系统线入口（CMake 体系）
 │   └── reusable-build.yml   # 核心复用工作流（被上述三者调用）
 └── scripts/
@@ -178,8 +185,8 @@ QT_MAJOR=5 QT_VERSION=5.15.17 QT_PLATFORM=linux-gcc \
 QT_LINUX_FLAVOR=modern QT_ENABLE_WAYLAND=true QT_USE_SYSTEM_PNG=true \
 QT_PREFIX="$HOME/Qt/5.15.17" bash .github/scripts/gen-configure-args.sh
 
-# Qt5 老系统线（CentOS7，内置 png，关 Wayland）
-QT_MAJOR=5 QT_VERSION=5.15.17 QT_PLATFORM=linux-centos7-devtoolset-9 \
+# Qt5 老系统线（AlmaLinux8，内置 png，关 Wayland）
+QT_MAJOR=5 QT_VERSION=5.15.17 QT_PLATFORM=linux-almalinux8-gcc-toolset-11 \
 QT_LINUX_FLAVOR=legacy QT_ENABLE_WAYLAND=false QT_USE_SYSTEM_PNG=false \
 QT_PREFIX="$HOME/Qt/5.15.17" bash .github/scripts/gen-configure-args.sh
 ```
@@ -195,13 +202,18 @@ QT_PREFIX="$HOME/Qt/5.15.17" bash .github/scripts/gen-configure-args.sh
 3. **macOS 跨架构**：`arm64` 产物需在 arm64 runner（macos-14）上构建，
    `x86_64` 用 macos-13。工作流按 `arch` 自动选择 runner。
 4. **容器内无法复用 Actions 缓存**，因此 Legacy 线默认关闭 ccache。
-5. **CentOS7 无法编译 Wayland**：base 源没有 `libwayland-devel`，
-   故 Legacy 线固定关闭 Wayland 并使用内置 libpng。
-6. **Qt6 无 Legacy 线**：CentOS7 的 OpenSSL 1.0.2k 不满足 Qt6 的 1.1.1+ 要求。
-7. **全量 qt-everywhere 耗时接近上限**：4 核 runner 上 2–5 小时，接近 6 小时
+5. **Legacy 线基线为 glibc 2.28（AlmaLinux 8）**，不再是 glibc 2.17。
+   原因是 GitHub 已强制 Node-based action 走 Node.js 24，而 Node 24 要求
+   glibc ≥ 2.27/2.28，CentOS7（2.17）内 `checkout`/`cache`/`upload-artifact`
+   全部无法运行。若确需 glibc 2.17，须改为"宿主 job 做 checkout/cache/upload、
+   容器 job 只编译"的双 job 结构（本仓库暂未实现）。
+6. **Legacy 线固定关闭 Wayland 并使用内置 libpng**（保持最大兼容；
+   AlmaLinux 8 虽有 libwayland-devel，但本线不启用）。
+7. **Qt6 无 Legacy 线**（尚未启用）：需单独验证 gcc-toolset 与 Qt6 的版本组合。
+8. **全量 qt-everywhere 耗时接近上限**：4 核 runner 上 2–5 小时，接近 6 小时
    job 上限；单个 job 上限设为 350 分钟，为上传产物预留约 10 分钟。
    Windows 的 msvc/mingw 全量构建尤其容易触顶，请优先评估。
-8. **`-openssl-linked` 会让产物硬依赖 OpenSSL 动态库**，而产包里**不含**这些库。
+9. **`-openssl-linked` 会让产物硬依赖 OpenSSL 动态库**，而产包里**不含**这些库。
    实测（Qt 6.8.3 / Windows / msvc2022）：`bin/Qt6Network.dll` 的导入表里直接写着
    `libssl-3-x64.dll`、`libcrypto-3-x64.dll`。也就是说目标机必须自行部署
    OpenSSL 3 x64，否则程序启动即报缺少 DLL。

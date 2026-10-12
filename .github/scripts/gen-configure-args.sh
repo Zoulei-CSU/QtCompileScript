@@ -140,7 +140,7 @@ _del_skip() {
     _skips_raw="$out"
 }
 
-if [[ "$QT_PLATFORM" == linux-centos7-* || "$QT_PLATFORM" == linux-legacy* ]]; then
+if [[ "$QT_PLATFORM" == linux-centos7-* || "$QT_PLATFORM" == linux-almalinux8-* || "$QT_PLATFORM" == linux-legacy* ]]; then
     # legacy：Qt5 靠跳过 qtwayland 关闭 wayland
     if [[ "$QT_MAJOR" == "5" ]] && ! _has_module "$_skips_raw" qtwayland; then
         _add_skip qtwayland
@@ -188,20 +188,20 @@ fi
 # 平台相关
 # ---------------------------------------------------------------------------
 case "$QT_PLATFORM" in
-    linux-centos7-*|linux-legacy*)
+    linux-centos7-*|linux-almalinux8-*|linux-legacy*)
         # -------------------------------------------------------------------
-        # 老系统线（CentOS7 / glibc 2.17）
+        # 老系统线（AlmaLinux 8 / glibc 2.28；旧 CentOS7 前缀兼容保留）
         #   固定策略：不开 wayland、用内置 png、iconv、fontconfig、openssl、libpq
         # -------------------------------------------------------------------
-        log "Linux 老系统线（legacy / glibc 2.17）"
+        log "Linux 老系统线（legacy / glibc 2.28）"
 
-        # 老系统默认用源码内置 libpng（系统 png 版本过低）
+        # 老系统默认用源码内置 libpng（系统 png 版本偏低，内置最稳）
         if [[ "${QT_USE_SYSTEM_PNG,,}" == "true" ]]; then
             log "警告: legacy 线不建议使用系统 libpng，已强制改为内置 -qt-libpng"
         fi
         ARGS+=(-qt-libpng)
 
-        # 显式关闭 Wayland（CentOS7 无 libwayland-devel；老系统不跑 Wayland 会话）
+        # 显式关闭 Wayland（老系统线不跑 Wayland 会话，保持最大兼容）
         if [[ "$QT_MAJOR" == "6" ]]; then
             ARGS+=(-no-feature-wayland)
         fi
