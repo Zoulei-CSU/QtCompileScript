@@ -5,7 +5,8 @@
 # 设计原则：
 #   1. 所有输入通过环境变量传入（QTS_ 前缀），便于在 Actions 和本地复用。
 #   2. Qt5 与 Qt6 的 configure 语义不同 -> 走不同分支（Qt6 用 CMake 风格参数）。
-#   3. 默认忽略重型模块（qtdoc/qt3d/qtwebengine/qtwebview）。
+#   3. 默认忽略重型模块（qtdoc/qt3d/qtwebengine/qtwebview/qtlocation）。
+#      qtlocation 依赖 mapbox-gl-native，编译极慢且第三方常失败，故默认跳过。
 #   4. 输出：把参数串写入 $GITHUB_OUTPUT（CI）或 stdout（本地）。
 #
 # 输入环境变量：
@@ -15,7 +16,7 @@
 #   QT_BUILD_TYPE       release | debug | debug-and-release (Qt5) / Release|Debug|RelWithDebInfo (Qt6)
 #   QT_ARCH             x86_64 | arm64
 #   QT_STATIC           true | false
-#   QT_SKIP_MODULES     逗号分隔，例如 qtdoc,qt3d,qtwebengine,qtwebview
+#   QT_SKIP_MODULES     逗号分隔，例如 qtdoc,qt3d,qtwebengine,qtwebview,qtlocation
 #   QT_EXTRA_ARGS       追加的原始 configure 参数
 #   QT_PREFIX           安装前缀
 #   QT_OPENSSL_LINKED   true | false（是否 -openssl-linked）
@@ -30,13 +31,14 @@
 # ---------------------------------------------------------------------------
 # 仅 Qt5 有（Qt6 传了会报 "Unknown command line option"）：
 #     -no-compile-examples   -verbose   -mp   -platform <mkspec>
-#     -opengl dynamic        -gui       -widgets      -no-angle（Qt6 无 angle）
+#     -gui       -widgets      -no-angle（Qt6 无 angle）
 # 仅 Qt6 有 / 语义不同：
 #     -feature-wayland / -no-feature-wayland   （Qt5 的 wayland 是独立模块 qtwayland，
 #                                                靠"不 skip qtwayland"来启用）
 # 两个版本都有的：-opensource -confirm-license -prefix -release -debug -shared -static
 #     -nomake -ltcg -icu/-no-icu -opengl <api> -xcb -xcb-xlib -libpng[qt|system]
 #     -iconv(Qt5) -sql-<driver> -openssl-linked -skip(仅顶层构建)
+#     （-opengl 两边都有；Windows 默认 dynamic，本项目显式 desktop）
 # ⚠️ `-D<str>` 在 Qt 里是"预处理器宏定义"，不是 CMake 变量！
 #     想透传 CMake 变量必须写成 `<选项...> -- -DCMAKE_XXX=yyy`（见下方 CM_PT）。
 #     例：Qt6 macOS 的 -DCMAKE_OSX_ARCHITECTURES 必须放在 `--` 之后。
@@ -52,7 +54,7 @@ QT_BUILD_TYPE="${QT_BUILD_TYPE:-release}"
 QT_ARCH="${QT_ARCH:-x86_64}"
 QT_STATIC="${QT_STATIC:-false}"
 QT_SOURCE_PACKAGE="${QT_SOURCE_PACKAGE:-qtbase}"
-QT_SKIP_MODULES="${QT_SKIP_MODULES:-qtdoc,qt3d,qtwebengine,qtwebview}"
+QT_SKIP_MODULES="${QT_SKIP_MODULES:-qtdoc,qt3d,qtwebengine,qtwebview,qtlocation}"
 QT_EXTRA_ARGS="${QT_EXTRA_ARGS:-}"
 QT_PREFIX="${QT_PREFIX:-/opt/Qt/${QT_VERSION}}"
 QT_OPENSSL_LINKED="${QT_OPENSSL_LINKED:-true}"
@@ -119,7 +121,8 @@ fi
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # 跳过模块
-#   基础列表由 QT_SKIP_MODULES 传入（默认 qtdoc/qt3d/qtwebengine/qtwebview）。
+#   基础列表由 QT_SKIP_MODULES 传入
+#   （默认 qtdoc/qt3d/qtwebengine/qtwebview/qtlocation）。
 #   额外规则：
 #     - legacy 线（Qt5，无 wayland）：追加跳过 qtwayland
 #     - modern 线：确保 qtwayland 不被跳过（Wayland 支持必需）
@@ -281,15 +284,20 @@ case "$QT_PLATFORM" in
         ;;
     windows-msvc*|windows-mingw*)
         if [[ "$QT_MAJOR" == "5" ]]; then
-            # Qt5：-platform 选 mkspec；-mp 多进程；-opengl dynamic 允许 ANGLE 回退
+            # Qt5：-platform 选 mkspec；-mp 多进程；
+            #       -opengl desktop 锁定桌面 OpenGL（用 opengl32.dll），不打包 ANGLE。
+            #       不用 dynamic —— dynamic 会带回 ANGLE 回退分支并多带一份 ANGLE 库。
             ARGS+=(-platform win32-msvc -mp -no-icu)
             ARGS+=(-qt-zlib -qt-freetype -qt-harfbuzz -qt-libpng -qt-libjpeg -qt-sqlite)
-            ARGS+=(-opengl dynamic -gui -widgets)
+            ARGS+=(-opengl desktop -no-angle -gui -widgets)
         else
             # Qt6：没有 -mp（并行由 Ninja 处理）、没有 -platform（mkspec 机制已废弃）
             #       架构由 MSVC 开发环境（vcvars x64）决定，无需 CMake 变量透传
+            #       OpenGL：Windows 上 Qt6 默认 dynamic，仍需显式锁定 desktop；
+            #       ANGLE 在 Qt6 已移除，不要写 -no-angle。
             ARGS+=(-no-icu)
             ARGS+=(-qt-zlib -qt-freetype -qt-harfbuzz -qt-libpng -qt-libjpeg -qt-sqlite)
+            ARGS+=(-opengl desktop)
         fi
         ;;
     *)

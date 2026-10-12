@@ -84,9 +84,10 @@ on:
 
       skip_modules:
         description: "跳过的模块（逗号分隔；qt5compat 会被自动保留）"
+        # qtlocation 默认跳过：依赖 mapbox-gl-native（重型第三方），编译极慢且常失败
         required: false
         type: string
-        default: "qtdoc,qt3d,qtwebengine,qtwebview"
+        default: "qtdoc,qt3d,qtwebengine,qtwebview,qtlocation"
 
       extra_configure_args:
         description: "追加 configure/CMake 参数（高级，可留空）"

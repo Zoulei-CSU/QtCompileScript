@@ -31,7 +31,7 @@
 |---|---|---|
 | 源码包 | `qt-everywhere` | 全量源码包（含全部模块），编译 2–5 小时 |
 | 构建类型 | `release` | 最快、体积最小 |
-| 跳过模块 | `qtdoc,qt3d,qtwebengine,qtwebview` | 避开最耗时的重型模块 |
+| 跳过模块 | `qtdoc,qt3d,qtwebengine,qtwebview,qtlocation` | 避开最耗时的重型模块；`qtlocation` 依赖 mapbox-gl-native，编译极慢且第三方常失败 |
 | 打包模式 | `dev-lite` | 剔除 doc/examples 源码，**保留全部开发文件**（include/.prl/.cmake/mkspecs） |
 | 跳过编译 | `tests` / `examples` | configure 时 `-nomake tests -nomake examples -no-compile-examples` |
 | ccache | 开启 | 二次编译可显著加速 |
@@ -114,6 +114,32 @@ Linux 编译按「系统新旧」分流，入口工作流已把差异固化，�
 | `pack_mode=dev-full` | 原样打包（含 doc/examples），产物可能超 GitHub Release 单资产 2GB 上限 |
 | `static_build` | 体积显著增大，注意 LGPL 合规 |
 | **`qt-everywhere` + `debug`** | **直接报错：预计超 6 小时，几乎必然失败** |
+
+---
+
+## 四·补充、Windows 的 OpenGL 后端：锁定 Desktop
+
+Windows 上**已显式指定 `-opengl desktop`**（Qt5 / Qt6 都是），不使用 `dynamic`。
+
+| 值 | 含义 | 本项目 |
+|---|---|---|
+| `desktop` | 锁定桌面 OpenGL，直接链接 `opengl32.dll`，渲染走显卡原生驱动 | ✅ **采用** |
+| `dynamic` | Windows 默认值。运行时探测：优先系统 OpenGL，否则回退 | ❌ 不用 |
+| `es2` | 只按 OpenGL ES 2 编译 | ❌ 不用 |
+
+为什么不用 `dynamic`：
+- Qt5 的 `dynamic` 会**带回 ANGLE 回退分支**，产物多一份 ANGLE 库，渲染可能走 D3D 翻译层，
+  性能与行为都不如原生 Desktop。
+- 本项目目标环境显卡驱动满足桌面 OpenGL，不需要回退兜底。
+
+Qt5/Qt6 差异（都已处理）：
+- **Qt5**：`-opengl desktop` **加** `-no-angle`（Qt5 有 ANGLE，必须显式关掉）。
+- **Qt6**：`-opengl desktop` 即可，**不要**再写 `-no-angle` —— ANGLE 在 Qt6 已移除，
+  写 `-no-angle` 会报 `Unknown command line option`。
+  （注意：Qt6 在 Windows 上的**默认值仍是 `dynamic`**，所以必须显式指定。）
+
+> 注意：`-opengl desktop` 意味着产物**硬依赖 `opengl32.dll`**（Windows 系统自带），
+> 不随包分发；目标机需具备可用的 OpenGL 驱动。
 
 ---
 

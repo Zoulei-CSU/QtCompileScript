@@ -13,8 +13,9 @@
 # 【Qt5 / Qt6 选项差异速查】—— 传错会导致 configure FATAL_ERROR
 # ---------------------------------------------------------------------------
 # 仅 Qt5 有：-no-compile-examples  -verbose  -mp  -platform <mkspec>
-#           -opengl dynamic  -gui  -widgets  -no-angle
+#           -gui  -widgets  -no-angle
 # 仅 Qt6 有：-feature-wayland / -no-feature-wayland
+# 两边都有：-opengl <es2|desktop|dynamic>（Windows 默认 dynamic；本项目显式 desktop）
 # ⚠️ `-D<str>` 是"预处理器宏定义"而非 CMake 变量；透传 CMake 变量须用 `-- -DXXX=yyy`。
 # ⚠️ `-skip` 仅在 qt-everywhere 顶层构建生效，故按 QT_SOURCE_PACKAGE 门控。
 # =============================================================================
@@ -44,7 +45,7 @@ $QT_BUILD_TYPE   = Get-EnvOr "QT_BUILD_TYPE" "release"
 $QT_ARCH         = Get-EnvOr "QT_ARCH" "x86_64"
 $QT_STATIC       = Get-EnvOr "QT_STATIC" "false"
 $QT_SOURCE_PACKAGE = Get-EnvOr "QT_SOURCE_PACKAGE" "qtbase"
-$QT_SKIP_MODULES = Get-EnvOr "QT_SKIP_MODULES" "qtdoc,qt3d,qtwebengine,qtwebview"
+$QT_SKIP_MODULES = Get-EnvOr "QT_SKIP_MODULES" "qtdoc,qt3d,qtwebengine,qtwebview,qtlocation"
 $QT_EXTRA_ARGS   = Get-EnvOr "QT_EXTRA_ARGS" ""
 $QT_PREFIX       = Get-EnvOr "QT_PREFIX" "D:\Qt\$QT_VERSION"
 $QT_OPENSSL      = Get-EnvOr "QT_OPENSSL_LINKED" "true"
@@ -103,20 +104,27 @@ if ($QT_MAJOR -eq "5") { $args.Add("-no-compile-examples") }
 if ($QT_PLATFORM -like "windows-*") {
     if ($QT_MAJOR -eq "5") {
         # Qt5：-verbose 打印详细日志；-platform 选 mkspec；-mp 多进程；
-        #       -opengl dynamic 允许 ANGLE 回退
+        #       -opengl desktop 锁定桌面 OpenGL（用 opengl32.dll），不打包 ANGLE。
+        #       注意：不用 dynamic —— dynamic 会带回 ANGLE 回退分支，
+        #       产物多一份 ANGLE 库且渲染走 D3D 翻译层；本项目明确要 Desktop。
         $args.Add("-verbose")
         $args.Add("-platform"); $args.Add("win32-msvc")
         $args.Add("-mp"); $args.Add("-no-icu")
         $args.Add("-qt-zlib"); $args.Add("-qt-freetype"); $args.Add("-qt-harfbuzz")
         $args.Add("-qt-libpng"); $args.Add("-qt-libjpeg"); $args.Add("-qt-sqlite")
-        $args.Add("-opengl"); $args.Add("dynamic")
+        $args.Add("-opengl"); $args.Add("desktop")
+        $args.Add("-no-angle")
         $args.Add("-gui"); $args.Add("-widgets")
     } else {
         # Qt6：没有 -verbose / -mp（并行交给 Ninja 生成器），也没有 -platform
         #      （mkspec 机制已废弃）。架构由 MSVC 开发环境（vcvars x64）决定。
+        #      OpenGL：Windows 上 Qt6 默认是 dynamic（运行时加载 opengl32），
+        #      仍支持 -opengl <es2|desktop|dynamic>；本项目锁定 desktop。
+        #      注意 ANGLE 在 Qt6 已移除，无需（也不应）再写 -no-angle。
         $args.Add("-no-icu")
         $args.Add("-qt-zlib"); $args.Add("-qt-freetype"); $args.Add("-qt-harfbuzz")
         $args.Add("-qt-libpng"); $args.Add("-qt-libjpeg"); $args.Add("-qt-sqlite")
+        $args.Add("-opengl"); $args.Add("desktop")
     }
 } else {
     Write-Log "警告: Windows 上遇到非 windows 平台 '$QT_PLATFORM'"
