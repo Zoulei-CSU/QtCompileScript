@@ -1,0 +1,95 @@
+# =============================================================================
+# docker-compose.yml —— Qt 可编译环境的容器编排
+#
+# 两个 service：
+#   modern  Ubuntu 22.04（glibc 2.35）  —— Qt5 / Qt6 现代线
+#   legacy  AlmaLinux 8（glibc 2.28）   —— Qt5 老系统线
+#
+# 用法：
+#   docker compose -f docker/docker-compose.yml build          # 构建全部
+#   docker compose -f docker/docker-compose.yml build modern   # 只构建现代线
+#   docker compose -f docker/docker-compose.yml run --rm modern  # 进入现代线容器
+#   docker compose -f docker/docker-compose.yml run --rm legacy  # 进入老系统线容器
+#
+# 挂载说明：
+#   ../            → /work/repo       本仓库（只读，用于取 .github/scripts 等）
+#   ../src         → /src             放 Qt 源码包/解包目录（可写）
+#   ../build       → /build           编译构建目录（可写）
+#   qtinstall:/opt/qt                 安装前缀（命名卷，产物落这里）
+#   ccache:/ccache                    ccache 缓存（命名卷，跨容器复用）
+#
+#   ⚠️ 这些目录若不存在，Docker 会自动创建（属主为 root）。
+#      建议先手动：mkdir -p src build
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # 现代线：Ubuntu 22.04
+  # ---------------------------------------------------------------------------
+  modern:
+    build:
+      context: .
+      dockerfile: Dockerfile.modern
+      args:
+        # 与宿主机 UID/GID 对齐，避免挂载目录里的文件变成 root 所有。
+        # Linux/macOS 下 compose 会自动读 .env 或 shell 环境；如未设置则退回默认 1000。
+        USER_UID: "${USER_UID:-1000}"
+        USER_GID: "${USER_GID:-1000}"
+    image: qt-build:modern
+    container_name: qt-build-modern
+    hostname: qt-modern
+    working_dir: /work
+    # 交互式 shell；容器退出后自动清理（配合 run 使用）
+    stdin_open: true
+    tty: true
+    volumes:
+      - ../:/work/repo:ro
+      - ../src:/src
+      - ../build:/build
+      - qtinstall-modern:/opt/qt
+      - ccache-modern:/ccache
+    environment:
+      QT_FLAVOR: modern
+      CCACHE_DIR: /ccache
+      CCACHE_MAXSIZE: "${CCACHE_MAXSIZE:-5G}"
+    # 编译吃 CPU/内存，给足资源；可按机器调整
+    # （compose v2 的 deploy 只在 swarm 生效，本地用 cpu_count 无效，
+    #   如需限制请在 build.sh 里用 docker run --cpus/--memory）
+    command: ["/bin/bash"]
+
+  # ---------------------------------------------------------------------------
+  # 老系统线：AlmaLinux 8（glibc 2.28）
+  # ---------------------------------------------------------------------------
+  legacy:
+    build:
+      context: .
+      dockerfile: Dockerfile.legacy
+      args:
+        USER_UID: "${USER_UID:-1000}"
+        USER_GID: "${USER_GID:-1000}"
+        # 工具链版本，与 CI 默认一致
+        GCC_TOOLSET: "${GCC_TOOLSET:-gcc-toolset-11}"
+    image: qt-build:legacy
+    container_name: qt-build-legacy
+    hostname: qt-legacy
+    working_dir: /work
+    stdin_open: true
+    tty: true
+    volumes:
+      - ../:/work/repo:ro
+      - ../src:/src
+      - ../build:/build
+      - qtinstall-legacy:/opt/qt
+      - ccache-legacy:/ccache
+    environment:
+      QT_FLAVOR: legacy
+      GCC_TOOLSET: "${GCC_TOOLSET:-gcc-toolset-11}"
+      CCACHE_DIR: /ccache
+      CCACHE_MAXSIZE: "${CCACHE_MAXSIZE:-5G}"
+    command: ["/bin/bash", "-l"]
+
+volumes:
+  qtinstall-modern:
+  qtinstall-legacy:
+  ccache-modern:
+  ccache-legacy:

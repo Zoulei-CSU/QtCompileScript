@@ -1,0 +1,145 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# Dockerfile.modern —— Qt5 / Qt6 可编译环境（**现代线**）
+#
+# 基础镜像：Ubuntu 22.04（glibc 2.35）
+#   与 GitHub Actions 的「modern 线」（qt5-modern.yml / qt6-modern.yml）保持一致。
+#
+# 用途：**只搭建可编译环境，不在镜像里编译 Qt。**
+#   镜像构建完成后进入容器，自行下载源码、configure、make。
+#   （Qt 全量编译 35 分钟~数小时，且源码体积巨大，不适合塞进镜像层。）
+#
+# 产物兼容面：glibc 2.35+ → 适合在较新的发行版上使用。
+#   若需要更老的目标系统（glibc 2.28），请用 Dockerfile.legacy。
+#
+# 构建：
+#   docker build -f docker/Dockerfile.modern -t qt-build:modern docker/
+#   （或直接用 docker/build.sh modern）
+# =============================================================================
+
+FROM ubuntu:22.04
+
+# 避免 apt 交互式提问（tzdata 等）
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Shanghai
+
+# ccache 相关默认值（可在运行时用 -e 覆盖）
+ENV CCACHE_DIR=/ccache
+ENV CCACHE_MAXSIZE=5G
+# 这几个 sloppiness 与 CI 保持一致，能显著提高 Qt 这种大工程的缓存命中率
+ENV CCACHE_COMPRESS=1
+ENV CCACHE_COMPRESSLEVEL=6
+ENV CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime
+
+# 让容器内的 locale / 终端显示中文更友好
+ENV LANG=C.UTF-8
+
+# -----------------------------------------------------------------------------
+# 1. 系统依赖
+#    清单与 .github/workflows/reusable-build.yml 的「安装依赖 (Ubuntu)」对齐。
+#    分三段安装并合并为一个 RUN，减少镜像层。
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    # universe 源：glslc(Vulkan shader 编译器, Source: shaderc) 等位于此
+    apt-get update -qq; \
+    apt-get install -y --no-install-recommends software-properties-common gnupg ca-certificates; \
+    add-apt-repository -y universe; \
+    apt-get update -qq; \
+    \
+    # ---- 必需依赖：缺失会直接导致 Qt configure 失败 ----
+    apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build ccache perl python3 \
+        libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev \
+        libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev \
+        libxrender-dev libxcb1-dev 'libxcb*-dev' libxcb-xkb-dev \
+        libxkbcommon-dev libxkbcommon-x11-dev libxcb-xinput-dev \
+        libfontconfig1-dev libfreetype6-dev \
+        libssl-dev libdbus-1-dev \
+        libwayland-dev libwayland-egl-backend-dev \
+        libpq-dev zlib1g-dev libpng-dev \
+        pkg-config bison flex gperf \
+        libpcre2-dev libsqlite3-dev; \
+    \
+    # ---- 常用辅助工具（下载/解包/调试）----
+    apt-get install -y --no-install-recommends \
+        git curl wget xz-utils unzip file \
+        vim less tree sudo bash-completion; \
+    \
+    # ---- 可选：Vulkan / SPIR-V 工具链 ----
+    #   Qt 的 vulkan feature 条件是 WrapVulkanHeaders_FOUND，属「可选」；
+    #   缺失只会让 vulkan feature 关闭（连带 vkkhrdisplay 插件），不会 configure 失败。
+    apt-get install -y --no-install-recommends \
+        libvulkan-dev glslc spirv-headers spirv-tools || true; \
+    \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 2. 非 root 用户
+#    与宿主机共享挂载目录时，避免文件属主全变成 root。
+#    默认 UID/GID 设为 1000；若与宿主机冲突，构建时用 --build-arg 覆盖：
+#      docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) ...
+# -----------------------------------------------------------------------------
+ARG USER_NAME=qtbuilder
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+RUN set -eux; \
+    if getent group "${USER_GID}" >/dev/null; then \
+        existing_group="$(getent group "${USER_GID}" | cut -d: -f1)"; \
+        groupmod -n "${USER_NAME}" "${existing_group}" || true; \
+    else \
+        groupadd -g "${USER_GID}" "${USER_NAME}"; \
+    fi; \
+    if getent passwd "${USER_UID}" >/dev/null; then \
+        existing_user="$(getent passwd "${USER_UID}" | cut -d: -f1)"; \
+        usermod -l "${USER_NAME}" -g "${USER_GID}" -m -d "/home/${USER_NAME}" "${existing_user}" || true; \
+    else \
+        useradd -m -u "${USER_UID}" -g "${USER_GID}" -s /bin/bash "${USER_NAME}"; \
+    fi; \
+    echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USER_NAME}"; \
+    chmod 0440 "/etc/sudoers.d/${USER_NAME}"; \
+    mkdir -p /ccache /work /src; \
+    chown -R "${USER_UID}:${USER_GID}" /ccache /work /src
+
+# -----------------------------------------------------------------------------
+# 3. 工作目录与 ccache 预置
+# -----------------------------------------------------------------------------
+WORKDIR /work
+
+# ccache 通过 PATH 前置软链目录接入（不要用 CC="ccache gcc"，Qt 会认不出编译器）。
+# 详见本仓库 .github/scripts/build-qt.sh 里同样的做法。
+ENV CCACHE_PATH=/usr/lib/ccache
+ENV PATH="/usr/lib/ccache:${PATH}"
+
+# -----------------------------------------------------------------------------
+# 4. 自检：构建结束前确认关键工具/头文件都在
+#    这一步能让镜像构建失败得「早且明确」，而不是等你 configure 到一半才发现。
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    echo "=== 工具链自检 ==="; \
+    gcc --version | head -n1; \
+    g++ --version | head -n1; \
+    cmake --version | head -n1; \
+    ninja --version; \
+    ccache --version | head -n1; \
+    python3 --version; \
+    echo "=== 关键开发库自检（缺失即构建失败，避免 configure 到一半才发现）==="; \
+    _bad=""; \
+    for p in openssl libpq fontconfig; do \
+        if pkg-config --exists "$p"; then echo "  $p  OK"; else echo "  $p  MISSING"; _bad="$_bad $p"; fi; \
+    done; \
+    if pkg-config --exists libpng || pkg-config --exists libpng16; then echo "  libpng  OK"; else _bad="$_bad libpng"; fi; \
+    if pkg-config --exists xcb || pkg-config --exists xcb-1; then echo "  xcb  OK"; else _bad="$_bad xcb"; fi; \
+    if [ -n "$_bad" ]; then echo "::ERROR:: 缺少开发库:$_bad"; exit 1; fi; \
+    echo "=== 基础镜像信息 ==="; \
+    grep -E '^(NAME|VERSION)=' /etc/os-release; \
+    ldd --version | head -n1
+
+# 注意：ARG 在 USER 指令中的展开依赖 BuildKit。为兼容旧版 docker build，
+# 这里显式写死默认用户名；如需改名，请同步改下面两处的 qtbuilder。
+# （build.sh 默认启用 BuildKit，DOCKER_BUILDKIT=1）
+USER qtbuilder
+
+# 默认进入交互式 shell；具体编译步骤见 docker/README.md
+CMD ["/bin/bash"]

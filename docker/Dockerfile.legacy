@@ -1,0 +1,201 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# Dockerfile.legacy —— Qt5 可编译环境（**老系统线**）
+#
+# 基础镜像：AlmaLinux 8（glibc 2.28）
+#   与 GitHub Actions 的「legacy 线」（qt5-legacy.yml）保持一致。
+#
+# 为什么不用 CentOS7？
+#   CentOS7 是 glibc 2.17。而 GitHub Actions 已把所有 Node20 系 action 强制跑在
+#   Node.js 24 上，Node 24 要求 glibc >= 2.27/2.28 —— CentOS7 跑不起来
+#   （actions/checkout 直接崩：`GLIBC_2.27 not found`）。该组合无解
+#   （Node 官方没有 glibc-217 的 Node 24 构建）。
+#   业界（PyTorch / NumPy / manylinux_2_28）已统一抬到 glibc 2.28 基线。
+#
+#   注意：**若你只是想要「产物能在 CentOS7 上运行」**，本镜像仍可用 ——
+#   glibc 2.28 上编译的 Qt 通常能在 2.28+ 系统运行；但要在真正的
+#   glibc 2.17 目标机上跑，需要目标机自身满足 Qt 的运行时依赖，且这条
+#   「反向」兼容并不保证。如需严格 2.17 目标，请自行评估。
+#
+# 用途：**只搭建可编译环境，不在镜像里编译 Qt。**
+#
+# 产物兼容面：glibc 2.28 → 覆盖 Debian 10+ / Ubuntu 18.10+ / RHEL 8+ / CentOS 8+。
+#
+# 构建：
+#   docker build -f docker/Dockerfile.legacy -t qt-build:legacy docker/
+#   （或直接用 docker/build.sh legacy）
+# =============================================================================
+
+FROM almalinux:8
+
+ENV TZ=Asia/Shanghai
+ENV LANG=C.UTF-8
+
+# 默认工具链版本（与 CI 默认一致）。可在构建时覆盖：
+#   docker build --build-arg GCC_TOOLSET=gcc-toolset-12 ...
+ARG GCC_TOOLSET=gcc-toolset-11
+
+# ccache 相关默认值
+ENV CCACHE_DIR=/ccache
+ENV CCACHE_MAXSIZE=5G
+ENV CCACHE_COMPRESS=1
+ENV CCACHE_COMPRESSLEVEL=6
+ENV CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime
+
+# -----------------------------------------------------------------------------
+# 1. 仓库准备
+#    CRB（旧名 powertools）是必须的：libdbusmenu-devel / libxkbcommon-x11-devel
+#    / libXcomposite-devel 等只在 CRB 里，不启用会导致整条 dnf install 失败。
+#    EPEL 提供少量补充包。
+#    两个仓库名都试一遍（不同小版本叫法不同），缺一不阻塞。
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    dnf install -y --setopt=install_weak_deps=False dnf-plugins-core; \
+    dnf config-manager --set-enabled powertools || \
+      dnf config-manager --set-enabled crb || true; \
+    dnf install -y --setopt=install_weak_deps=False epel-release || true; \
+    dnf clean all
+
+# -----------------------------------------------------------------------------
+# 2. 编译依赖
+#    清单与 .github/workflows/reusable-build.yml 的「安装依赖 (老系统容器)」对齐。
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    dnf install -y --setopt=install_weak_deps=False \
+        "${GCC_TOOLSET}" \
+        make cmake ninja-build ccache perl python3 which \
+        mesa-libGL-devel mesa-libEGL-devel \
+        libxcb-devel xcb-util-devel xcb-util-image-devel xcb-util-keysyms-devel \
+        xcb-util-renderutil-devel xcb-util-wm-devel \
+        libX11-devel libXrender-devel libXi-devel libXext-devel \
+        libXfixes-devel libXrandr-devel libXcursor-devel libXinerama-devel \
+        libXcomposite-devel libdrm-devel \
+        libxkbcommon-devel libxkbcommon-x11-devel \
+        fontconfig-devel libffi-devel sqlite-devel \
+        bison flex pcre2-devel openssl-devel \
+        postgresql-devel \
+        libdbusmenu-devel; \
+    \
+    # ---- 常用辅助工具 ----
+    dnf install -y --setopt=install_weak_deps=False \
+        git curl wget xz tar unzip file vim less tree sudo bash-completion; \
+    \
+    # ---- 可选：Wayland 依赖（老系统线固定关闭 Wayland，但预装以便将来开启）----
+    dnf install -y --setopt=install_weak_deps=False \
+        libwayland-client-devel libwayland-server-devel || true; \
+    \
+    dnf clean all; \
+    rm -rf /var/cache/dnf/*
+
+# -----------------------------------------------------------------------------
+# 3. 非 root 用户
+#    与宿主机共享挂载目录时，避免文件属主全变成 root。
+# -----------------------------------------------------------------------------
+ARG USER_NAME=qtbuilder
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+RUN set -eux; \
+    if getent group "${USER_GID}" >/dev/null; then \
+        existing_group="$(getent group "${USER_GID}" | cut -d: -f1)"; \
+        groupmod -n "${USER_NAME}" "${existing_group}" || true; \
+    else \
+        groupadd -g "${USER_GID}" "${USER_NAME}"; \
+    fi; \
+    if getent passwd "${USER_UID}" >/dev/null; then \
+        existing_user="$(getent passwd "${USER_UID}" | cut -d: -f1)"; \
+        usermod -l "${USER_NAME}" -g "${USER_GID}" -m -d "/home/${USER_NAME}" "${existing_user}" || true; \
+    else \
+        useradd -m -u "${USER_UID}" -g "${USER_GID}" -s /bin/bash "${USER_NAME}"; \
+    fi; \
+    echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USER_NAME}"; \
+    chmod 0440 "/etc/sudoers.d/${USER_NAME}"; \
+    mkdir -p /ccache /work /src; \
+    chown -R "${USER_UID}:${USER_GID}" /ccache /work /src
+
+# -----------------------------------------------------------------------------
+# 4. gcc-toolset 与 ccache 接入
+#
+#    gcc-toolset 走 SCL（Software Collections）：需要用 `scl enable` 激活，
+#    或在 shell 里 source enable 脚本。这里做成「默认 shell 自动激活」，
+#    免得每开一个终端都要手动 enable —— 这是最容易忘的一步。
+#
+#    ⚠️ SCL 的 enable 脚本会重置 PATH；因此 ccache 软链目录要在激活**之后**
+#    再前置，否则会被 SCL 覆盖掉。
+# -----------------------------------------------------------------------------
+ARG GCC_TOOLSET=gcc-toolset-11
+ENV GCC_TOOLSET=${GCC_TOOLSET}
+
+# 用一段脚本统一激活 toolset + 前置 ccache 软链目录。
+#   为什么不用 ENV PATH 直接写死：SCL 的 enable 脚本会**重置** PATH，
+#   所以必须在 enable 之后再前置 ccache 目录，无法用静态 ENV 表达。
+#
+#   两处接入：
+#     1) /etc/profile.d/  —— 登录 shell（docker run / bash -l / 交互终端）
+#     2) BASH_ENV          —— 非交互式 bash（docker run image cmd、脚本调用）
+#   两者都指向同一个脚本，行为一致。
+RUN set -eux; \
+    cat > /etc/profile.d/zz-gcc-toolset.sh <<'PROFILE'
+# 自动激活 gcc-toolset（SCL）。
+# zz- 前缀确保在其它 profile 之后执行，避免被覆盖。
+if [ -f "/opt/rh/${GCC_TOOLSET:-gcc-toolset-11}/enable" ]; then
+    # shellcheck disable=SC1090
+    . "/opt/rh/${GCC_TOOLSET:-gcc-toolset-11}/enable"
+fi
+# SCL 会重置 PATH → 这里再把 ccache 软链目录前置
+if [ -d /usr/lib64/ccache ]; then
+    case ":$PATH:" in
+        *:/usr/lib64/ccache:*) ;;
+        *) export PATH="/usr/lib64/ccache:$PATH" ;;
+    esac
+fi
+PROFILE
+    chmod 0644 /etc/profile.d/zz-gcc-toolset.sh; \
+    # BASH_ENV：非交互式 bash 启动时会 source 该文件
+    ln -sf /etc/profile.d/zz-gcc-toolset.sh /etc/qt-bashenv.sh
+ENV BASH_ENV=/etc/qt-bashenv.sh
+
+# Ubuntu 的 ccache 包会自带 /usr/lib/ccache 软链目录；AlmaLinux 的是 /usr/lib64/ccache。
+# 若 ccache 包未自动建软链，这里兜底补一份（幂等）。
+RUN set -eux; \
+    if [ ! -d /usr/lib64/ccache ]; then \
+        mkdir -p /usr/lib64/ccache; \
+        for c in gcc g++ cc c++; do \
+            real="$(command -v "$c" || true)"; \
+            if [ -n "$real" ]; then ln -sf "$(command -v ccache)" "/usr/lib64/ccache/$c"; fi; \
+        done; \
+    fi; \
+    ls -l /usr/lib64/ccache | head -10
+
+WORKDIR /work
+
+# -----------------------------------------------------------------------------
+# 5. 自检
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    source "/opt/rh/${GCC_TOOLSET}/enable"; \
+    echo "=== 工具链自检 ==="; \
+    gcc --version | head -n1; \
+    g++ --version | head -n1; \
+    cmake --version | head -n1; \
+    ninja --version; \
+    ccache --version | head -n1 || echo "(ccache 未装)"; \
+    python3 --version; \
+    echo "=== 关键开发库自检（缺失即构建失败，避免 configure 到一半才发现）==="; \
+    _bad=""; \
+    for p in openssl libpq fontconfig; do \
+        if pkg-config --exists "$p"; then echo "  $p  OK"; else echo "  $p  MISSING"; _bad="$_bad $p"; fi; \
+    done; \
+    if pkg-config --exists libpng || pkg-config --exists libpng16; then echo "  libpng  OK"; else _bad="$_bad libpng"; fi; \
+    if pkg-config --exists xcb || pkg-config --exists xcb-1; then echo "  xcb  OK"; else _bad="$_bad xcb"; fi; \
+    if [ -n "$_bad" ]; then echo "::ERROR:: 缺少开发库:$_bad"; exit 1; fi; \
+    echo "=== 基础镜像信息 ==="; \
+    grep -E '^(NAME|VERSION)=' /etc/os-release; \
+    ldd --version | head -n1
+
+# 注意：ARG 在 USER 指令中的展开依赖 BuildKit。为兼容旧版 docker build，
+# 这里显式写死默认用户名；如需改名，请同步改上面两处的 qtbuilder。
+USER qtbuilder
+
+# 默认用登录 shell，以便 /etc/profile.d 里的 toolset 自动激活生效。
+CMD ["/bin/bash", "-l"]
