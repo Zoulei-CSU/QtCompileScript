@@ -145,6 +145,30 @@ if ($LASTEXITCODE -ne 0) { Write-Error "安装失败"; exit $LASTEXITCODE }
 $installSec = [int]((Get-Date) - $t0).TotalSeconds
 
 # ---------------------------------------------------------------------------
+# 归档 config.summary：本次 configure 的完整配置快照（每个 feature 开/关、
+#   三方库取 system 还是 bundled 等）。
+#   放进安装前缀内部，打包（zip 的是 $QT_PREFIX）时会自动随包发出。
+#   Qt6 由 CMake 写出 build/config.summary；找不到则退回 configure.log。
+# ---------------------------------------------------------------------------
+$summaryCandidates = @(
+    (Join-Path $QT_BUILD_DIR "config.summary"),
+    (Join-Path $configureDir "config.summary")
+)
+$summarySrc = $null
+foreach ($c in $summaryCandidates) {
+    if (Test-Path $c) { $summarySrc = $c; break }
+}
+if ($summarySrc) {
+    Copy-Item -Force $summarySrc (Join-Path $QT_PREFIX "config.summary") -ErrorAction SilentlyContinue
+    Write-Host "config.summary 已归档到: $(Join-Path $QT_PREFIX 'config.summary')"
+} else {
+    Write-Warn2 "未找到 config.summary，改为归档 configure.log（含全部 configure 输出）"
+    if (Test-Path "configure.log") {
+        Copy-Item -Force "configure.log" (Join-Path $QT_PREFIX "configure.log") -ErrorAction SilentlyContinue
+    }
+}
+
+# ---------------------------------------------------------------------------
 # 摘要
 # ---------------------------------------------------------------------------
 if ($QT_USE_CCACHE.ToLower() -eq "true" -and (Get-Command ccache -ErrorAction SilentlyContinue)) {

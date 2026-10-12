@@ -43,6 +43,7 @@ mkdir -p "$QT_OUTPUT_DIR"
 #     lib/cmake/**       CMake 配置（find_package(Qt6) 依赖）
 #     mkspecs/           平台规格
 #     lib/*.so bin/ plugins/ qml/
+#     config.summary     本次 configure 的配置快照（溯源用）
 # ---------------------------------------------------------------------------
 case "$QT_PACK_MODE" in
     runtime-only|dev-lite|lite)
@@ -78,6 +79,30 @@ if [[ ! -d "$QT_PREFIX/include" ]]; then
     exit 1
 fi
 log "开发文件校验通过：include/ 存在"
+
+# ---------------------------------------------------------------------------
+# 归档 config.summary：本次 configure 的配置快照，随包发出便于溯源
+#   正常情况下 build 阶段已把它放进 $QT_PREFIX/config.summary；
+#   这里做兜底——若前缀内没有，就去常见位置找一份补进来。
+#   找不到也不报错（老版本或有特殊构建方式时可能确实没有）。
+# ---------------------------------------------------------------------------
+SUMMARY_DST="$QT_PREFIX/config.summary"
+if [[ ! -f "$SUMMARY_DST" ]]; then
+    for cand in "$QT_PREFIX/../config.summary" \
+                "${QT_BUILD_DIR:-}/config.summary" \
+                "build/config.summary" \
+                "config.summary"; do
+        if [[ -n "$cand" && -f "$cand" ]]; then
+            cp -f "$cand" "$SUMMARY_DST" 2>/dev/null || true
+            break
+        fi
+    done
+fi
+if [[ -f "$SUMMARY_DST" ]]; then
+    log "已把 config.summary 纳入产物: $SUMMARY_DST"
+else
+    log "提示: 未找到 config.summary，产物中不含该配置快照"
+fi
 
 # ---------------------------------------------------------------------------
 # 清理符号表（Linux，仅动态库 .so）
@@ -119,6 +144,13 @@ BUILD_INFO="$QT_OUTPUT_DIR/BUILD-INFO.txt"
     echo ""
     echo "---- configure 参数 ----"
     echo "${QT_CONFIGURE_ARGS:-n/a}"
+    echo ""
+    echo "---- 配置快照 ----"
+    if [[ -f "$QT_PREFIX/config.summary" ]]; then
+        echo "config.summary : 已包含（包内路径 $(basename "$QT_PREFIX")/config.summary）"
+    else
+        echo "config.summary : 未包含（构建时未产出或无该文件）"
+    fi
     echo ""
     echo "---- 硬件环境 ----"
     if [[ "$(uname -s)" == "Darwin" ]]; then

@@ -34,7 +34,7 @@ if (-not (Test-Path $QT_OUTPUT_DIR)) { New-Item -ItemType Directory -Path $QT_OU
 #   仅剔除"体积巨大且与开发无关"的纯文档与示例源码。
 #     dev-lite  （默认）: 剔除 doc/ 与 examples/demos 源码，保留所有开发/运行文件
 #     dev-full          : 保留全部文件，原样打包（含文档与示例）
-#   绝不删除：include/ *.prl *.la lib/cmake/** mkspecs/ bin/ plugins/ qml/ 等
+#   绝不删除：include/ *.prl *.la lib/cmake/** mkspecs/ bin/ plugins/ qml/ config.summary 等
 # ---------------------------------------------------------------------------
 if ($QT_PACK_MODE -in @("runtime-only", "dev-lite", "lite")) {
     Write-Log "瘦身模式(dev-lite)：仅剔除 doc/ 与 examples/demos 源码，保留全部开发文件"
@@ -76,6 +76,29 @@ if (-not (Test-Path $incDir)) {
 Write-Log "开发文件校验通过：include/ 存在"
 
 # ---------------------------------------------------------------------------
+# 归档 config.summary：本次 configure 的配置快照，随包发出便于溯源
+#   正常情况下 build 阶段已放进 $QT_PREFIX/config.summary；这里做兜底。
+# ---------------------------------------------------------------------------
+$summaryDst = Join-Path $QT_PREFIX "config.summary"
+if (-not (Test-Path $summaryDst)) {
+    $cands = @()
+    if ($env:QT_BUILD_DIR) { $cands += (Join-Path $env:QT_BUILD_DIR "config.summary") }
+    $cands += @(
+        (Join-Path (Split-Path $QT_PREFIX -Parent) "config.summary"),
+        (Join-Path (Get-Location) "build\config.summary"),
+        (Join-Path (Get-Location) "config.summary")
+    )
+    foreach ($c in $cands) {
+        if ($c -and (Test-Path $c)) { Copy-Item -Force $c $summaryDst -ErrorAction SilentlyContinue; break }
+    }
+}
+if (Test-Path $summaryDst) {
+    Write-Log "已把 config.summary 纳入产物: $summaryDst"
+} else {
+    Write-Log "提示: 未找到 config.summary，产物中不含该配置快照"
+}
+
+# ---------------------------------------------------------------------------
 # BUILD-INFO.txt
 # ---------------------------------------------------------------------------
 $buildInfo = Join-Path $QT_OUTPUT_DIR "BUILD-INFO.txt"
@@ -98,6 +121,9 @@ $memGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemor
     ""
     "---- configure 参数 ----"
     "$env:QT_CONFIGURE_ARGS"
+    ""
+    "---- 配置快照 ----"
+    $(if (Test-Path (Join-Path $QT_PREFIX 'config.summary')) { "config.summary : 已包含（包内路径 $(Split-Path $QT_PREFIX -Leaf)/config.summary）" } else { "config.summary : 未包含（构建时未产出或无该文件）" })
     ""
     "---- 硬件环境 ----"
     "CPU       : $cpu"

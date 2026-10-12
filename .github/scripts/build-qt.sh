@@ -156,7 +156,13 @@ done
 
 if [[ -n "$SUMMARY_FILE" ]]; then
     log "校验 config.summary: $SUMMARY_FILE"
+    # 归档：把本次 configure 的配置快照放进安装前缀内部，
+    #   这样打包（tar 的就是 $QT_PREFIX）时会**自动**随包发出，
+    #   无需改打包脚本的排除规则。同时在父目录留一份便于本地查看。
+    mkdir -p "$QT_PREFIX" 2>/dev/null || true
+    cp -f "$SUMMARY_FILE" "$QT_PREFIX/config.summary" 2>/dev/null || true
     cp -f "$SUMMARY_FILE" "$QT_PREFIX/../config.summary" 2>/dev/null || true
+    log "  config.summary 已归档到: $QT_PREFIX/config.summary"
 
     _check_yes() {
         local label="$1" pattern="$2" required="${3:-true}"
