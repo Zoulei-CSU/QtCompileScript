@@ -42,9 +42,9 @@ if [[ -z "${QT_JOBS:-}" ]]; then
     MEM_LIMIT=$(( MEM_GB / 2 ))
     (( MEM_LIMIT < 1 )) && MEM_LIMIT=1
     QT_JOBS=$(( NCPU < MEM_LIMIT ? NCPU : MEM_LIMIT ))
-    log "自动推算并行度: CPU=${NCPU} 核, 内存=${MEM_GB} GB -> make -j${QT_JOBS}"
+    log "自动推算并行度: CPU=${NCPU} 核, 内存=${MEM_GB} GB -> -j${QT_JOBS}"
 else
-    log "使用指定并行度: make -j${QT_JOBS}"
+    log "使用指定并行度: -j${QT_JOBS}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -181,8 +181,18 @@ if [[ -n "$SUMMARY_FILE" ]]; then
         # xcb
         _check_yes "xcb" "xcb" || true
         # Wayland（modern 线才要求）
+        #   ⚠️ Qt6 的 wayland 是 qtbase 里的 PUBLIC feature，且 **没有** 被
+        #   qt_configure_add_summary_entry 登记进 config.summary —— 直接 grep
+        #   会永远报"缺失"（假警报）。真正的判据是「平台插件是否产出」，
+        #   那要等编译完；这里退而求其次，只在能查到摘要条目时校验，
+        #   查不到就如实说明"无法从 summary 判定"，不当成失败。
         if [[ "${QT_ENABLE_WAYLAND:-}" == "true" ]]; then
-            _check_yes "Wayland" "Wayland" || true
+            if grep -qiE 'wayland' "$SUMMARY_FILE"; then
+                _check_yes "Wayland" "Wayland" || true
+            else
+                log "  [略]   Wayland（Qt6 不把该 feature 写入 config.summary，"
+                log "         改由编译后的 plugins/platforms/libqwayland-*.so 佐证）"
+            fi
         fi
     fi
 
@@ -198,15 +208,28 @@ fi
 
 # ---------------------------------------------------------------------------
 # Build
+#   Qt5 的 configure（qmake 体系）默认生成 Makefile → 用 make/gmake
+#   Qt6 的 configure 包装器**强制 -G Ninja** → 生成 build.ninja，
+#   此时必须用 ninja，否则报 "No targets specified and no makefile found"。
+#   这里不靠大版本判断，直接看构建目录里实际生成了什么，最稳。
 # ---------------------------------------------------------------------------
-log "开始编译 (make -j${QT_JOBS}) ..."
+if [[ -f "$QT_BUILD_DIR/build.ninja" ]]; then
+    BUILD_TOOL="ninja"
+elif [[ -f "$QT_BUILD_DIR/Makefile" ]]; then
+    BUILD_TOOL="make"; command -v gmake >/dev/null 2>&1 && BUILD_TOOL="gmake"
+else
+    warn "构建目录中既无 build.ninja 也无 Makefile，尝试按编译器推测"
+    if [[ "$QT_MAJOR" == "6" ]] && command -v ninja >/dev/null 2>&1; then
+        BUILD_TOOL="ninja"
+    else
+        BUILD_TOOL="make"; command -v gmake >/dev/null 2>&1 && BUILD_TOOL="gmake"
+    fi
+fi
+
+log "开始编译 (${BUILD_TOOL} -j${QT_JOBS}) ..."
 START_TS=$(date +%s)
 
-MAKE_CMD="make"
-command -v gmake >/dev/null 2>&1 && MAKE_CMD="gmake"
-# macOS 上 xcode 的 make 也能用
-
-"$MAKE_CMD" -j"${QT_JOBS}" 2>&1 | tee build.log
+"$BUILD_TOOL" -j"${QT_JOBS}" 2>&1 | tee build.log
 BUILD_SEC=$(( $(date +%s) - START_TS ))
 log "编译完成，耗时 $(( BUILD_SEC / 60 )) 分钟"
 
@@ -215,7 +238,7 @@ log "编译完成，耗时 $(( BUILD_SEC / 60 )) 分钟"
 # ---------------------------------------------------------------------------
 log "开始安装到 $QT_PREFIX ..."
 START_TS=$(date +%s)
-"$MAKE_CMD" install 2>&1 | tee install.log
+"$BUILD_TOOL" install 2>&1 | tee install.log
 INSTALL_SEC=$(( $(date +%s) - START_TS ))
 log "安装完成，耗时 ${INSTALL_SEC}s"
 
