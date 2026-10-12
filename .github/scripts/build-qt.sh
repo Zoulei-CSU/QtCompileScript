@@ -58,15 +58,25 @@ if [[ "${QT_USE_CCACHE,,}" == "true" ]]; then
         export CCACHE_COMPRESSLEVEL=6
         export CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime
         mkdir -p "$CCACHE_DIR"
-        # 关键：把编译器指向 ccache 包装
-        CC_COMPILER=$(command -v gcc || command -v clang || true)
-        CXX_COMPILER=$(command -v g++ || command -v clang++ || true)
-        if [[ -n "$CC_COMPILER" && -n "$CXX_COMPILER" ]]; then
-            ln -sf "$(command -v ccache)" "$(dirname "$CC_COMPILER")/ccache-gcc" 2>/dev/null || true
-            export CC="ccache $CC_COMPILER"
-            export CXX="ccache $CXX_COMPILER"
-            log "ccache 已启用: $CCACHE_DIR (max=${CCACHE_MAXSIZE})"
-        fi
+
+        # 用「包装脚本目录 + 调整 PATH」的方式接入 ccache，而不是
+        #   export CC="ccache gcc"
+        # 后者把「带空格的命令串」塞进 CC/CXX，CMake 在某些场景（尤其
+        # moc 的 predef 生成 `$CC -dM -E -c ...`）会把它当可执行文件直接
+        # exec，导致 ccache 把后续的 `-std=gnu++17` 等参数当成自己的选项：
+        #   /usr/bin/ccache: invalid option -- 't'
+        # 走 PATH 前缀则 CC/CXX 仍是干净的 /usr/bin/gcc，一切正常。
+        CCACHE_BIN_DIR="$QT_BUILD_DIR/.ccache-bin"
+        mkdir -p "$CCACHE_BIN_DIR"
+        CCACHE_REAL="$(command -v ccache)"
+        for _c in gcc g++ cc c++ clang clang++; do
+            _p="$(command -v "$_c" 2>/dev/null || true)"
+            [[ -n "$_p" ]] && ln -sf "$CCACHE_REAL" "$CCACHE_BIN_DIR/$_c"
+        done
+        export PATH="$CCACHE_BIN_DIR:$PATH"
+        log "ccache 已启用: $CCACHE_DIR (max=${CCACHE_MAXSIZE}), 包装目录=$CCACHE_BIN_DIR"
+        log "  gcc -> $(command -v gcc)"
+        log "  g++ -> $(command -v g++)"
         ccache --show-stats || true
     else
         warn "指定启用 ccache 但未找到 ccache 命令，已跳过"
