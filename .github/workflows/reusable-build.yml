@@ -321,7 +321,16 @@ jobs:
         run: |
           set -euo pipefail
           echo "::group::apt install"
+
+          # GitHub 的 ubuntu-24.04 runner 默认只启用 main/restricted。
+          # 而 glslc（Vulkan shader 编译器，Source: shaderc）、spirv-* 等均位于
+          # universe 源 → 不显式启用会报 "Unable to locate package glslc"。
+          sudo add-apt-repository -y universe
           sudo apt-get update -qq
+
+          # ---------------------------------------------------------------
+          # 必需依赖：缺失会直接导致 configure 失败
+          # ---------------------------------------------------------------
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build ccache perl python3 \
             libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev \
@@ -330,11 +339,30 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libxcb-xinput-dev \
             libfontconfig1-dev libfreetype6-dev \
             libssl-dev libdbus-1-dev \
-            libvulkan-dev glslc spirv-headers \
             libwayland-dev libwayland-egl-backend-dev \
             libpq-dev zlib1g-dev libpng-dev \
             pkg-config bison flex gperf \
             libpcre2-dev libsqlite3-dev
+          echo "::endgroup::"
+
+          # ---------------------------------------------------------------
+          # 可选依赖：Vulkan / SPIR-V 工具链
+          #   Qt 的 vulkan feature 条件是 WrapVulkanHeaders_FOUND，且
+          #   qt_find_package(WrapVulkanHeaders ... MARK_OPTIONAL) —— 属于
+          #   「可选」而非硬需求，缺失只会让 vulkan feature 关闭（并连带
+          #   vkkhrdisplay 平台插件），不会让 configure 失败。
+          #   因此这里单独安装且**失败不阻塞**，避免上游仓库再变动时
+          #   又把整条构建线拖死。
+          #   注：glslc / spirv-* 来自 universe 源（Source: shaderc）。
+          # ---------------------------------------------------------------
+          echo "::group::apt install (可选: Vulkan)"
+          if sudo apt-get install -y --no-install-recommends \
+               libvulkan-dev glslc spirv-headers spirv-tools 2>/dev/null; then
+            echo "Vulkan / SPIR-V 工具链已安装，vulkan feature 可启用"
+          else
+            echo "::warning title=可选依赖缺失::Vulkan/SPIR-V 工具链未能安装，"\
+          "本次构建将关闭 vulkan feature（不影响 Qt 主体功能）"
+          fi
           echo "::endgroup::"
 
           # 按需安装指定版本的 gcc / clang
