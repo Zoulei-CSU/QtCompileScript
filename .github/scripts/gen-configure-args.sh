@@ -24,6 +24,24 @@
 #   QT_LINUX_FLAVOR     legacy | modern（Linux 专用，决定 wayland/png/依赖策略）
 #   QT_ENABLE_WAYLAND   true | false（Linux modern 线启用 Wayland）
 #   QT_USE_SYSTEM_PNG   true | false（true=系统 libpng；false=内置 -qt-libpng）
+#
+# ---------------------------------------------------------------------------
+# 【Qt5 / Qt6 选项差异速查】—— 每一项都会导致 configure 直接 FATAL_ERROR，务必遵守
+# ---------------------------------------------------------------------------
+# 仅 Qt5 有（Qt6 传了会报 "Unknown command line option"）：
+#     -no-compile-examples   -verbose   -mp   -platform <mkspec>
+#     -opengl dynamic        -gui       -widgets      -no-angle（Qt6 无 angle）
+# 仅 Qt6 有 / 语义不同：
+#     -feature-wayland / -no-feature-wayland   （Qt5 的 wayland 是独立模块 qtwayland，
+#                                                靠"不 skip qtwayland"来启用）
+# 两个版本都有的：-opensource -confirm-license -prefix -release -debug -shared -static
+#     -nomake -ltcg -icu/-no-icu -opengl <api> -xcb -xcb-xlib -libpng[qt|system]
+#     -iconv(Qt5) -sql-<driver> -openssl-linked -skip(仅顶层构建)
+# ⚠️ `-D<str>` 在 Qt 里是"预处理器宏定义"，不是 CMake 变量！
+#     想透传 CMake 变量必须写成 `<选项...> -- -DCMAKE_XXX=yyy`（见下方 CM_PT）。
+#     例：Qt6 macOS 的 -DCMAKE_OSX_ARCHITECTURES 必须放在 `--` 之后。
+# ⚠️ `-skip` / `-no-qml-debug` 只在 qt-everywhere 顶层构建生效，qtbase 单模块下会报警告
+#     （`-skip`）或直接报未知选项（`-no-qml-debug` 属 qtdeclarative），故按源码粒度门控。
 # =============================================================================
 set -euo pipefail
 
@@ -33,6 +51,7 @@ QT_PLATFORM="${QT_PLATFORM:-linux-gcc}"
 QT_BUILD_TYPE="${QT_BUILD_TYPE:-release}"
 QT_ARCH="${QT_ARCH:-x86_64}"
 QT_STATIC="${QT_STATIC:-false}"
+QT_SOURCE_PACKAGE="${QT_SOURCE_PACKAGE:-qtbase}"
 QT_SKIP_MODULES="${QT_SKIP_MODULES:-qtdoc,qt3d,qtwebengine,qtwebview}"
 QT_EXTRA_ARGS="${QT_EXTRA_ARGS:-}"
 QT_PREFIX="${QT_PREFIX:-/opt/Qt/${QT_VERSION}}"
@@ -47,6 +66,11 @@ QT_USE_SYSTEM_PNG="${QT_USE_SYSTEM_PNG:-}"
 log() { printf '[gen-configure-args] %s\n' "$*" >&2; }
 
 ARGS=()
+# 需要透传给 CMake 的变量（-Dxxx=yyy）
+#   Qt6 会以 `-- -Dxxx=yyy` 形式追加到末尾；
+#   注意：Qt 的 `-D<str>` 语义是"预处理器宏定义"，直接写 -Dxxx=yyy 会被当成宏，
+#   必须放在 `--` 之后才会作为 CMake 变量透传。
+CM_PT=()
 
 # ---------------------------------------------------------------------------
 # 通用：许可证与基础开关（Qt5 / Qt6 都需要）
@@ -137,17 +161,28 @@ if [[ "$QT_MAJOR" == "6" ]] && _has_module "$_skips_raw" qt5compat; then
 fi
 
 if [[ -n "$_skips_raw" ]]; then
-    IFS=',' read -r -a _skips <<< "$_skips_raw"
-    for m in "${_skips[@]}"; do
-        m="$(echo "$m" | xargs)"   # trim
-        [[ -n "$m" ]] && ARGS+=(-skip "$m")
-    done
+    # -skip 只在顶层构建（qt-everywhere）生效；
+    # 单模块源码（qtbase）下传 -skip 只会产生 "only effective in top-level builds" 警告。
+    if [[ "$QT_SOURCE_PACKAGE" == "qt-everywhere" ]]; then
+        IFS=',' read -r -a _skips <<< "$_skips_raw"
+        for m in "${_skips[@]}"; do
+            m="$(echo "$m" | xargs)"   # trim
+            [[ -n "$m" ]] && ARGS+=(-skip "$m")
+        done
+    else
+        log "非顶层构建（$QT_SOURCE_PACKAGE）：忽略 -skip 列表（该选项仅在 qt-everywhere 顶层生效）"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
 # 减少无用产物
+#   -nomake tests/examples : Qt5 / Qt6 均支持
+#   -no-compile-examples   : Qt5 独有；Qt6 configure 会报 "Unknown command line option"
 # ---------------------------------------------------------------------------
-ARGS+=(-nomake tests -nomake examples -no-compile-examples)
+ARGS+=(-nomake tests -nomake examples)
+if [[ "$QT_MAJOR" == "5" ]]; then
+    ARGS+=(-no-compile-examples)
+fi
 
 # ---------------------------------------------------------------------------
 # 平台相关
@@ -225,23 +260,35 @@ case "$QT_PLATFORM" in
 
     macos-clang|macos-*)
         # macOS 架构
-        ARGS+=(-DCMAKE_OSX_ARCHITECTURES="$QT_ARCH")
-        if [[ "$QT_ARCH" == "arm64" ]]; then
-            ARGS+=(-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0)
+        #   Qt6 走 CMake：CMAKE_OSX_* 需要放在 `--` 之后透传（写入 CM_PT）
+        #   Qt5 不走 CMake，且官方明确不支持 arm64/universal 构建，
+        #       因此不传 -DCMAKE_OSX_*（否则会被当作预处理器宏定义）；
+        #       目标架构由 runner 自身架构决定（macos-13=x86_64 / macos-14=arm64）。
+        if [[ "$QT_MAJOR" == "6" ]]; then
+            CM_PT+=(-DCMAKE_OSX_ARCHITECTURES="$QT_ARCH")
+            if [[ "$QT_ARCH" == "arm64" ]]; then
+                CM_PT+=(-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0)
+            else
+                CM_PT+=(-DCMAKE_OSX_DEPLOYMENT_TARGET=10.15)
+            fi
         else
-            ARGS+=(-DCMAKE_OSX_DEPLOYMENT_TARGET=10.15)
+            log "Qt5 macOS：跳过 -DCMAKE_OSX_*（Qt5 不支持该透传，架构随 runner）"
         fi
-        if [[ "$QT_MAJOR" == "5" ]]; then
+        # -no-qml-debug 是 qtdeclarative 的选项，仅在 qt-everywhere 顶层构建时可用
+        if [[ "$QT_MAJOR" == "5" && "$QT_SOURCE_PACKAGE" == "qt-everywhere" ]]; then
             ARGS+=(-no-qml-debug)
         fi
         ;;
     windows-msvc*|windows-mingw*)
         if [[ "$QT_MAJOR" == "5" ]]; then
+            # Qt5：-platform 选 mkspec；-mp 多进程；-opengl dynamic 允许 ANGLE 回退
             ARGS+=(-platform win32-msvc -mp -no-icu)
             ARGS+=(-qt-zlib -qt-freetype -qt-harfbuzz -qt-libpng -qt-libjpeg -qt-sqlite)
             ARGS+=(-opengl dynamic -gui -widgets)
         else
-            ARGS+=(-mp)
+            # Qt6：没有 -mp（并行由 Ninja 处理）、没有 -platform（mkspec 机制已废弃）
+            #       架构由 MSVC 开发环境（vcvars x64）决定，无需 CMake 变量透传
+            ARGS+=(-no-icu)
             ARGS+=(-qt-zlib -qt-freetype -qt-harfbuzz -qt-libpng -qt-libjpeg -qt-sqlite)
         fi
         ;;
@@ -319,6 +366,15 @@ if [[ -n "$QT_EXTRA_ARGS" ]]; then
     # shellcheck disable=SC2206
     _extra=( $QT_EXTRA_ARGS )
     ARGS+=("${_extra[@]}")
+fi
+
+# ---------------------------------------------------------------------------
+# CMake 变量透传（必须放最后，用 `--` 与 configure 选项分隔）
+# ---------------------------------------------------------------------------
+if [[ ${#CM_PT[@]} -gt 0 ]]; then
+    ARGS+=(--)
+    ARGS+=("${CM_PT[@]}")
+    log "CMake 透传参数: ${CM_PT[*]}"
 fi
 
 # ---------------------------------------------------------------------------
