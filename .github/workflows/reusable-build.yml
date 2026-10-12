@@ -276,14 +276,18 @@ jobs:
           #   AlmaLinux 8 有 glibc 2.28，既能跑这些 action，产物兼容面又远宽于
           #   Ubuntu 22.04（2.35），覆盖 Debian10+/Ubuntu18.10+/RHEL8+。
           echo "::group::系统信息"
-          cat /etc/os-release | head -3
-          ldd --version | head -1
+          # 注意：不要用 `... | head -N`。在 `set -o pipefail` 下，上游命令
+          # （cat / dnf ...）在 head 提前关管道后会收到 SIGPIPE，退出码 141
+          # （128+13），pipefail 会把整个管道判为失败，导致步骤莫名报 141。
+          # 这里用 grep -m N 限流，或把 head 放在最后并显式 || true。
+          { grep -m3 -E '^(NAME|VERSION|ID)=' /etc/os-release || true; }
+          { ldd --version 2>/dev/null | head -n1 || true; }
           echo "::endgroup::"
 
           echo "::group::安装容器基础工具"
           # AlmaLinux 8 官方源仍在线（EOL 2029），无需切 vault
           dnf install -y --setopt=install_weak_deps=False \
-            git which tar xz wget ca-certificates dnf-plugins-core || true
+            git which tar xz wget ca-certificates dnf-plugins-core
           echo "::endgroup::"
 
       # =======================================================================
@@ -386,6 +390,16 @@ jobs:
           echo "::group::dnf install (AlmaLinux 8 + gcc-toolset)"
           # AlmaLinux 8 用 dnf；gcc-toolset 等价于 CentOS7 的 devtoolset，
           # 通过 scl enable 激活（与原来一致的用法）。
+          #
+          # 先确保 CodeReady/powertools 仓库可用：libdbusmenu-devel、
+          # libxkbcommon-x11-devel、libXcomposite-devel 等只在 CRB/PowerTools 里。
+          # 不同小版本仓库名有差异（powertools / crb），两个都试，缺一不阻塞。
+          dnf install -y --setopt=install_weak_deps=False dnf-plugins-core >/dev/null 2>&1 || true
+          dnf config-manager --set-enabled powertools >/dev/null 2>&1 || \
+            dnf config-manager --set-enabled crb >/dev/null 2>&1 || true
+          # EPEL 提供 libdbusmenu-devel 等少量包；装不上也继续（下方按需提示）
+          dnf install -y --setopt=install_weak_deps=False epel-release >/dev/null 2>&1 || true
+
           dnf install -y --setopt=install_weak_deps=False \
             "${{ inputs.devtoolset }}" \
             make cmake ninja-build perl python3 which \
@@ -543,7 +557,8 @@ jobs:
           ls -d qt-src/*/
 
           # 自动探测真实解包目录名（命名规则不统一，不能靠猜）
-          REAL_DIR="$(find qt-src -maxdepth 1 -mindepth 1 -type d | head -n1)"
+          # 用 find -print -quit 代替 `find | head`，从根上避免 SIGPIPE/141
+          REAL_DIR="$(find qt-src -maxdepth 1 -mindepth 1 -type d -print -quit)"
           if [[ -z "$REAL_DIR" ]]; then
             echo "::error::解包后未找到任何目录"
             exit 1
