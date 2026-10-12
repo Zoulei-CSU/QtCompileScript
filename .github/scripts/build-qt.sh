@@ -254,18 +254,36 @@ log "安装完成，耗时 ${INSTALL_SEC}s"
 # ---------------------------------------------------------------------------
 # 编译后核验：Wayland 平台插件是否真的产出
 #   这是 Wayland feature 的**唯一可靠判据**（config.summary 判定不了，见上）。
-#   仅 modern 线（QT_ENABLE_WAYLAND=true）检查；缺失只告警不中断。
+#
+#   ⚠️ 但要注意**模块归属**：Qt6 里 QPA 平台插件 libqwayland*.so 属于
+#   **独立模块 qtwayland**，不在 qtbase 内。因此：
+#     - qtbase 单模块构建：本来就不该有 libqwayland*.so，缺失属正常 → 只做提示；
+#     - qt-everywhere 全量构建：qtwayland 不能被 skip，缺失才是真问题 → 告警。
+#   仅 modern 线（QT_ENABLE_WAYLAND=true）检查；一律不中断构建。
 # ---------------------------------------------------------------------------
 if [[ "$QT_PLATFORM" == linux-* || -n "${QT_LINUX_FLAVOR:-}" ]]; then
     if [[ "${QT_ENABLE_WAYLAND:-}" == "true" ]]; then
         WL_PLUGINS=$(find "$QT_PREFIX/plugins/platforms" -maxdepth 1 -name 'libqwayland*.so' 2>/dev/null | wc -l)
+        # qtwayland 是否在本次构建范围内
+        WAYLAND_MODULE_IN_SCOPE="false"
+        if [[ "${QT_SOURCE_PACKAGE:-qtbase}" == "qt-everywhere" ]]; then
+            if [[ ",${QT_SKIP_MODULES:-}," != *",qtwayland,"* ]]; then
+                WAYLAND_MODULE_IN_SCOPE="true"
+            fi
+        fi
+
         if [[ "$WL_PLUGINS" -gt 0 ]]; then
             log "Wayland 平台插件核验通过：plugins/platforms/ 下发现 ${WL_PLUGINS} 个 libqwayland*.so"
             find "$QT_PREFIX/plugins/platforms" -maxdepth 1 -name 'libqwayland*.so' 2>/dev/null | sed 's/^/    /'
+        elif [[ "$WAYLAND_MODULE_IN_SCOPE" == "true" ]]; then
+            warn "Wayland 平台插件核验**未通过**：本次为 qt-everywhere 且未 skip qtwayland，"
+            warn "  但 plugins/platforms/ 下没有 libqwayland*.so。"
+            warn "  请检查 libwayland-dev / 相关依赖是否装成功，或 qtwayland 是否真的被编出来。"
+            warn "  产物仍会继续打包上传。"
         else
-            warn "Wayland 平台插件核验**未通过**：plugins/platforms/ 下没有 libqwayland*.so。"
-            warn "  说明本次构建实际未编出 Wayland 平台插件（请检查 libwayland-dev 等依赖是否装成功，"
-            warn "  或 configure 里 -feature-wayland 是否真的生效）。产物仍会继续打包上传。"
+            log "  [提示] 本次源码粒度=${QT_SOURCE_PACKAGE:-qtbase}，不含 qtwayland 模块，"
+            log "         platforms 插件在 qtbase 内本就不产出 libqwayland*.so（正常）。"
+            log "         要获得 Wayland 平台插件请构建 qt-everywhere 且不要 skip qtwayland。"
         fi
     fi
 fi

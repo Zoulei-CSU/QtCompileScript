@@ -590,6 +590,7 @@ jobs:
           QT_LINUX_FLAVOR: ${{ inputs.linux_flavor }}
           QT_ENABLE_WAYLAND: ${{ inputs.enable_wayland }}
           QT_SOURCE_PACKAGE: ${{ inputs.source_package }}
+          QT_SKIP_MODULES: ${{ inputs.skip_modules }}
         run: |
           # CentOS7 容器内需要先启用 devtoolset
           if [[ "${{ inputs.use_container }}" == "true" ]]; then
