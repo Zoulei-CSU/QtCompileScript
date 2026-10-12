@@ -1,0 +1,175 @@
+# =============================================================================
+# qt5-modern.yml —— Qt5 新系统线（Ubuntu 22.04+ / glibc 2.35+）与 Windows / macOS
+#
+# 使用方式：仓库页面 -> Actions -> 左侧选择 "Qt5 Build (Modern)" -> Run workflow
+#
+# 说明：
+#   - 默认跳过 qtdoc / qt3d / qtwebengine / qtwebview 等重型模块
+#   - 默认 release 构建
+#   - 默认 qt-everywhere 全量源码包（编译约 2-4 小时，见下方风险警告）
+#   - 选择 debug 会收到风险警告
+#   - Linux 线固定启用：openssl-linked / libpq(psql) / iconv / fontconfig / xcb
+#     + Wayland（-feature-wayland，Qt5 走 qtwayland 模块）
+#     + 系统 libpng（-system-libpng）
+#     + 输出 strip + tar.xz
+#   - 老系统（CentOS7 / glibc 2.17）请改用 "Qt5 Build (Legacy)" 工作流
+#
+# 风险提示：
+#   qt-everywhere 全量包在 4 核 runner 上通常需 2-4 小时，接近 6 小时 job 上限，
+#   存在被强制中断的风险。已配置 timeout-minutes=350 保留上传余量。
+# =============================================================================
+name: Qt5 Build (Modern)
+
+on:
+  workflow_dispatch:
+    inputs:
+      qt_version:
+        description: "Qt5 版本（5.15.16+ 有独立 qtbase 子包；5.15.2 及更早命名不同）"
+        required: true
+        type: choice
+        default: "5.15.17"
+        options:
+          - "5.15.19"
+          - "5.15.18"
+          - "5.15.17"
+          - "5.15.16"
+          - "5.15.2"
+
+      os:
+        description: "目标系统（老系统请用 Legacy 工作流）"
+        required: true
+        type: choice
+        default: "linux"
+        options:
+          - linux
+          - windows
+          - macos
+
+      compiler:
+        description: "编译器"
+        required: true
+        type: choice
+        default: "gcc"
+        options:
+          - gcc
+          - clang
+          - msvc2022
+          - msvc2019
+          - mingw
+
+      arch:
+        description: "目标架构"
+        required: true
+        type: choice
+        default: "x86_64"
+        options:
+          - x86_64
+          - arm64
+
+      source_package:
+        description: "源码包粒度（everywhere 全量，编译时长 2-4 小时，有失败风险）"
+        required: true
+        type: choice
+        default: "qt-everywhere"
+        options:
+          - qt-everywhere
+          - qtbase
+
+      build_type:
+        description: "构建类型（debug 耗时 2-3 倍，有超时/超体积风险）"
+        required: true
+        type: choice
+        default: "release"
+        options:
+          - release
+          - debug
+          - debug-and-release
+
+      skip_modules:
+        description: "跳过的模块（逗号分隔）"
+        required: false
+        type: string
+        default: "qtdoc,qt3d,qtwebengine,qtwebview"
+
+      extra_configure_args:
+        description: "追加 configure 参数（高级，可留空）"
+        required: false
+        type: string
+        default: ""
+
+      sql_drivers:
+        description: "额外 SQL 驱动（逗号分隔，如 oci；Linux 上 psql 始终启用）"
+        required: false
+        type: string
+        default: ""
+
+      static_build:
+        description: "静态构建（体积大，注意 LGPL 合规）"
+        required: false
+        type: boolean
+        default: false
+
+      use_ccache:
+        description: "启用 ccache 加速（推荐）"
+        required: false
+        type: boolean
+        default: true
+
+      pack_mode:
+        description: "打包模式（dev-lite 剔除 doc/examples 源码；dev-full 原样打包）"
+        required: true
+        type: choice
+        default: "dev-lite"
+        options:
+          - dev-lite
+          - dev-full
+
+      create_release:
+        description: "创建/更新 Release"
+        required: false
+        type: boolean
+        default: true
+
+      prerelease:
+        description: "标记为预发布"
+        required: false
+        type: boolean
+        default: false
+
+      release_tag:
+        description: "Release tag（留空自动生成）"
+        required: false
+        type: string
+        default: ""
+
+# -----------------------------------------------------------------------------
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      qt_major: "5"
+      qt_version: ${{ inputs.qt_version }}
+      os: ${{ inputs.os }}
+      compiler: ${{ inputs.compiler }}
+      arch: ${{ inputs.arch }}
+      build_type: ${{ inputs.build_type }}
+      source_package: ${{ inputs.source_package }}
+      static_build: ${{ inputs.static_build }}
+      skip_modules: ${{ inputs.skip_modules }}
+      extra_configure_args: ${{ inputs.extra_configure_args }}
+      openssl_linked: true
+      sql_drivers: ${{ inputs.sql_drivers }}
+      use_ccache: ${{ inputs.use_ccache }}
+      # 新系统线：modern / 启用 Wayland / 使用系统 libpng
+      linux_flavor: "modern"
+      enable_wayland: true
+      use_system_png: true
+      pack_mode: ${{ inputs.pack_mode }}
+      create_release: ${{ inputs.create_release }}
+      release_tag: ${{ inputs.release_tag }}
+      prerelease: ${{ inputs.prerelease }}
+      use_container: false
+      timeout_minutes: 350

@@ -1,0 +1,154 @@
+# =============================================================================
+# qt5-legacy.yml —— Qt5 老系统线（CentOS7 / glibc 2.17）
+#
+# 使用场景：
+#   需要产物能在 CentOS7 / 麒麟 / 统信等老 glibc（2.17）系统上运行。
+#   直接在 ubuntu-22.04 上编译出来的 Qt 依赖 glibc 2.35+，在老系统跑不起来。
+#   所以这里用 centos:7 容器 + devtoolset 编译，保证 glibc 2.17 兼容。
+#
+# 本线固定策略（不可通过参数改变，均为老系统硬约束）：
+#   - 源码包：qt-everywhere（全量，含 qtwayland 模块但被 skip）
+#   - Wayland：关闭（CentOS7 base 源无 libwayland-devel）
+#   - libpng：源码内置（-qt-libpng，老系统 libpng 过旧）
+#   - iconv：启用；ICU：关闭（-iconv -no-icu）
+#   - 始终启用：openssl-linked / libpq(psql) / fontconfig / xcb / opengl desktop
+#   - 输出：strip + tar.xz
+#
+# 注意：
+#   - CentOS7 已于 2024-06 EOL，yum 源需指向 vault.centos.org（脚本内已处理）
+#   - 容器内编译无法用 Actions Cache 的 ccache（路径隔离），故 ccache 默认关闭
+#   - CentOS7 只有 OpenSSL 1.0.2k，Qt6 要求 1.1.1+，因此本线只编译 Qt5
+# =============================================================================
+name: Qt5 Build (Legacy / CentOS7 glibc2.17)
+
+on:
+  workflow_dispatch:
+    inputs:
+      qt_version:
+        description: "Qt5 版本"
+        required: true
+        type: choice
+        default: "5.15.17"
+        options:
+          - "5.15.19"
+          - "5.15.18"
+          - "5.15.17"
+          - "5.15.16"
+          - "5.15.2"
+
+      devtoolset:
+        description: "devtoolset 版本（决定 GCC 版本）"
+        required: true
+        type: choice
+        default: "devtoolset-9"
+        options:
+          - "devtoolset-9"
+          - "devtoolset-10"
+          - "devtoolset-11"
+          - "devtoolset-7"
+
+      arch:
+        description: "目标架构"
+        required: true
+        type: choice
+        default: "x86_64"
+        options:
+          - x86_64
+
+      build_type:
+        description: "构建类型（debug 耗时 2-3 倍，有超时/超体积风险）"
+        required: true
+        type: choice
+        default: "release"
+        options:
+          - release
+          - debug
+          - debug-and-release
+
+      skip_modules:
+        description: "跳过的模块（逗号分隔；qtwayland 会被自动加入）"
+        required: false
+        type: string
+        default: "qtdoc,qt3d,qtwebengine,qtwebview"
+
+      extra_configure_args:
+        description: "追加 configure 参数（高级，可留空）"
+        required: false
+        type: string
+        default: ""
+
+      sql_drivers:
+        description: "额外 SQL 驱动（逗号分隔，如 oci；psql 始终启用）"
+        required: false
+        type: string
+        default: ""
+
+      static_build:
+        description: "静态构建（体积大，注意 LGPL 合规）"
+        required: false
+        type: boolean
+        default: false
+
+      pack_mode:
+        description: "打包模式（dev-lite 剔除 doc/examples 源码；dev-full 原样打包）"
+        required: true
+        type: choice
+        default: "dev-lite"
+        options:
+          - dev-lite
+          - dev-full
+
+      create_release:
+        description: "创建/更新 Release"
+        required: false
+        type: boolean
+        default: true
+
+      prerelease:
+        description: "标记为预发布"
+        required: false
+        type: boolean
+        default: false
+
+      release_tag:
+        description: "Release tag（留空自动生成）"
+        required: false
+        type: string
+        default: ""
+
+# -----------------------------------------------------------------------------
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      qt_major: "5"
+      qt_version: ${{ inputs.qt_version }}
+      # 平台标识用 linux-centos7-<devtoolset>，便于后缀命名与参数生成分支识别
+      os: "linux"
+      compiler: "centos7-${{ inputs.devtoolset }}"
+      arch: ${{ inputs.arch }}
+      build_type: ${{ inputs.build_type }}
+      # 全量 qt-everywhere
+      source_package: "qt-everywhere"
+      static_build: ${{ inputs.static_build }}
+      skip_modules: ${{ inputs.skip_modules }}
+      extra_configure_args: ${{ inputs.extra_configure_args }}
+      openssl_linked: true
+      sql_drivers: ${{ inputs.sql_drivers }}
+      # 容器内 ccache 缓存无法跨运行复用，默认关闭
+      use_ccache: false
+      # 老系统线固定：legacy / 关闭 Wayland / 不用系统 libpng（用内置）
+      linux_flavor: "legacy"
+      enable_wayland: false
+      use_system_png: false
+      pack_mode: ${{ inputs.pack_mode }}
+      create_release: ${{ inputs.create_release }}
+      release_tag: ${{ inputs.release_tag }}
+      prerelease: ${{ inputs.prerelease }}
+      use_container: true
+      container_image: "centos:7"
+      devtoolset: ${{ inputs.devtoolset }}
+      timeout_minutes: 350

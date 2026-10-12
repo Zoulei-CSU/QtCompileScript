@@ -1,0 +1,749 @@
+# =============================================================================
+# reusable-build.yml —— Qt 编译核心复用工作流
+#
+# 由 qt5.yml / qt6.yml / qt5-centos7.yml 通过 workflow_call 调用。
+# 不直接暴露给用户，避免参数面板分散。
+#
+# 职责：
+#   1. 校验参数组合合法性（含风险警告）
+#   2. 打印编译机器硬件资源
+#   3. 安装系统依赖
+#   4. 下载并解包 Qt 源码（含缓存）
+#   5. 生成 configure 参数
+#   6. configure + build + install
+#   7. 精简 + 打包 + 校验
+#   8. 上传 artifact 并发布到 Release
+# =============================================================================
+name: Reusable Qt Build
+
+on:
+  workflow_call:
+    inputs:
+      qt_major:
+        description: "Qt 大版本 (5 或 6)"
+        required: true
+        type: string
+      qt_version:
+        description: "Qt 版本号，例如 5.15.17 / 6.8.3"
+        required: true
+        type: string
+      os:
+        description: "目标系统: linux / windows / macos"
+        required: true
+        type: string
+      compiler:
+        description: "编译器: gcc / clang / msvc2022 / msvc2019 / mingw / devtoolset"
+        required: true
+        type: string
+      arch:
+        description: "目标架构: x86_64 / arm64"
+        required: false
+        type: string
+        default: "x86_64"
+      build_type:
+        description: "构建类型: release / debug / debug-and-release"
+        required: false
+        type: string
+        default: "release"
+      source_package:
+        description: "源码包: qtbase / qt-everywhere"
+        required: false
+        type: string
+        default: "qtbase"
+      static_build:
+        description: "是否静态构建"
+        required: false
+        type: boolean
+        default: false
+      skip_modules:
+        description: "跳过的模块，逗号分隔"
+        required: false
+        type: string
+        default: "qtdoc,qt3d,qtwebengine,qtwebview"
+      extra_configure_args:
+        description: "追加的 configure 参数"
+        required: false
+        type: string
+        default: ""
+      openssl_linked:
+        description: "是否 -openssl-linked"
+        required: false
+        type: boolean
+        default: true
+      sql_drivers:
+        description: "需要的 SQL 驱动，逗号分隔，如 psql,oci"
+        required: false
+        type: string
+        default: ""
+      use_ccache:
+        description: "是否启用 ccache 加速"
+        required: false
+        type: boolean
+        default: true
+      linux_flavor:
+        description: "Linux 线: legacy(老系统/glibc2.17) / modern(新系统) / auto"
+        required: false
+        type: string
+        default: "auto"
+      enable_wayland:
+        description: "是否启用 Wayland 支持（Linux modern 线）"
+        required: false
+        type: boolean
+        default: true
+      use_system_png:
+        description: "Linux: true=系统 libpng(-system-libpng)；false=内置(-qt-libpng)"
+        required: false
+        type: boolean
+        default: true
+      pack_mode:
+        description: "打包模式: dev-lite（剔除 doc/examples 源码，保留全部开发文件）/ dev-full（原样打包）"
+        required: false
+        type: string
+        default: "dev-lite"
+      create_release:
+        description: "是否创建/更新 GitHub Release"
+        required: false
+        type: boolean
+        default: true
+      release_tag:
+        description: "Release tag（留空自动生成）"
+        required: false
+        type: string
+        default: ""
+      prerelease:
+        description: "是否标记为预发布"
+        required: false
+        type: boolean
+        default: false
+      use_container:
+        description: "是否在容器内构建（CentOS7 兼容场景）"
+        required: false
+        type: boolean
+        default: false
+      container_image:
+        description: "容器镜像"
+        required: false
+        type: string
+        default: "centos:7"
+      devtoolset:
+        description: "devtoolset 版本（CentOS7 用），例如 devtoolset-9"
+        required: false
+        type: string
+        default: "devtoolset-9"
+      timeout_minutes:
+        description: "单 job 超时时间（分钟），留 10 分钟余量给上传"
+        required: false
+        type: number
+        default: 350
+
+    outputs:
+      artifact_name:
+        description: "产物名称"
+        value: ${{ jobs.build.outputs.artifact_name }}
+      build_seconds:
+        description: "编译耗时（秒）"
+        value: ${{ jobs.build.outputs.build_seconds }}
+
+# -----------------------------------------------------------------------------
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Qt${{ inputs.qt_major }} ${{ inputs.qt_version }} / ${{ inputs.os }}-${{ inputs.compiler }}
+    runs-on: ${{ inputs.os == 'linux' && 'ubuntu-22.04' || (inputs.os == 'windows' && 'windows-2022' || (inputs.arch == 'arm64' && 'macos-14' || 'macos-13')) }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    container: ${{ inputs.use_container && inputs.container_image || null }}
+
+    concurrency:
+      group: qt-build-${{ inputs.qt_major }}-${{ inputs.qt_version }}-${{ inputs.os }}-${{ inputs.compiler }}-${{ inputs.build_type }}
+      cancel-in-progress: false
+
+    env:
+      QT_MAJOR: ${{ inputs.qt_major }}
+      QT_VERSION: ${{ inputs.qt_version }}
+      QT_PLATFORM: ${{ inputs.os }}-${{ inputs.compiler }}
+      QT_ARCH: ${{ inputs.arch }}
+      QT_BUILD_TYPE: ${{ inputs.build_type }}
+      QT_SOURCE_PACKAGE: ${{ inputs.source_package }}
+      QT_STATIC: ${{ inputs.static_build }}
+      QT_SKIP_MODULES: ${{ inputs.skip_modules }}
+      QT_EXTRA_ARGS: ${{ inputs.extra_configure_args }}
+      QT_OPENSSL_LINKED: ${{ inputs.openssl_linked }}
+      QT_SQL_DRIVERS: ${{ inputs.sql_drivers }}
+      QT_USE_CCACHE: ${{ inputs.use_ccache }}
+      QT_PACK_MODE: ${{ inputs.pack_mode }}
+      QT_LINUX_FLAVOR: ${{ inputs.linux_flavor }}
+      QT_ENABLE_WAYLAND: ${{ inputs.enable_wayland }}
+      QT_USE_SYSTEM_PNG: ${{ inputs.use_system_png }}
+      IS_WINDOWS: ${{ inputs.os == 'windows' }}
+      IS_MACOS: ${{ inputs.os == 'macos' }}
+      IS_LINUX: ${{ inputs.os == 'linux' }}
+
+    outputs:
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
+      build_seconds: ${{ steps.build.outputs.build_seconds || '0' }}
+
+    steps:
+      # =======================================================================
+      # 0. 参数校验 + 风险警告
+      # =======================================================================
+      - name: 参数校验与风险提示
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::参数校验"
+          echo "  Qt 版本    : ${{ inputs.qt_version }}"
+          echo "  目标系统   : ${{ inputs.os }}"
+          echo "  编译器     : ${{ inputs.compiler }}"
+          echo "  架构       : ${{ inputs.arch }}"
+          echo "  构建类型   : ${{ inputs.build_type }}"
+          echo "  源码粒度   : ${{ inputs.source_package }}"
+          echo "  静态构建   : ${{ inputs.static_build }}"
+          echo "  跳过模块   : ${{ inputs.skip_modules }}"
+          echo "  打包模式   : ${{ inputs.pack_mode }}"
+          echo "::endgroup::"
+
+          WARN=0
+
+          # ---- 高风险组合检查 ----
+          if [[ "${{ inputs.source_package }}" == "qt-everywhere" ]]; then
+            echo "::warning title=编译时长风险::选择了 qt-everywhere 完整源码包。即使在 4 核 runner 上，Linux/macOS 约需 2-4 小时，Windows 约需 2-5 小时，且有较大概率触发 6 小时 job 上限而被强制中断。建议优先使用 qtbase。"
+            WARN=$((WARN+1))
+          fi
+
+          if [[ "${{ inputs.build_type }}" == "debug" || "${{ inputs.build_type }}" == "debug-and-release" ]]; then
+            echo "::warning title=编译时长与体积风险::选择了 ${{ inputs.build_type }} 构建。Debug 构建耗时约为 Release 的 2-3 倍，产物体积可达 3-5 倍，极大概率超过 GitHub Release 单资产 2GB 上限。建议仅在必要时使用。"
+            WARN=$((WARN+1))
+          fi
+
+          if [[ "${{ inputs.build_type }}" == "debug-and-release" && "${{ inputs.qt_major }}" == "6" ]]; then
+            echo "::warning title=参数不兼容::Qt6 已取消 debug-and-release 组合参数，将自动回退为 release。"
+            WARN=$((WARN+1))
+          fi
+
+          if [[ "${{ inputs.static_build }}" == "true" ]]; then
+            echo "::warning title=许可与体积提示::静态构建会显著增大产物体积，且需注意 LGPL 合规要求。"
+            WARN=$((WARN+1))
+          fi
+
+          if [[ "${{ inputs.pack_mode }}" == "dev-full" || "${{ inputs.pack_mode }}" == "full" ]]; then
+            echo "::warning title=产物体积风险::选择了 dev-full 原样打包（含 doc/examples），产物可能超过 2GB 单资产上限。若超限，Release 上传步骤会失败。"
+            WARN=$((WARN+1))
+          fi
+
+          # ---- Linux 线一致性检查 ----
+          if [[ "${{ inputs.os }}" == "linux" ]]; then
+            if [[ "${{ inputs.use_container }}" == "true" && "${{ inputs.enable_wayland }}" == "true" ]]; then
+              echo "::warning title=Wayland 不可用::容器（CentOS7/glibc 2.17）内没有 libwayland-devel，无法启用 Wayland。将自动强制关闭 Wayland。"
+              WARN=$((WARN+1))
+            fi
+            if [[ "${{ inputs.use_container }}" == "true" && "${{ inputs.use_system_png }}" == "true" ]]; then
+              echo "::warning title=libpng 版本风险::老系统（CentOS7）系统 libpng 版本过旧，建议使用内置 libpng（use_system_png=false / -qt-libpng）。将自动回退为内置。"
+              WARN=$((WARN+1))
+            fi
+            if [[ "${{ inputs.qt_major }}" == "6" && "${{ inputs.use_container }}" == "true" ]]; then
+              echo "::error title=系统不兼容::Qt6 要求 OpenSSL 1.1.1+，而 CentOS7 只有 OpenSSL 1.0.2k；且 Qt6 需要更新的编译器。CentOS7 线只支持 Qt5。"
+            fi
+          fi
+
+          # 高危组合：everywhere + debug = 几乎必然失败
+          if [[ "${{ inputs.source_package }}" == "qt-everywhere" && ( "${{ inputs.build_type }}" == "debug" || "${{ inputs.build_type }}" == "debug-and-release" ) ]]; then
+            echo "::error title=高危组合::qt-everywhere + Debug 构建组合耗时预计超过 6 小时，几乎必然失败。强烈建议改为 qtbase，或改用 release。"
+          fi
+
+          echo ""
+          if (( WARN > 0 )); then
+            echo "================================================================"
+            echo " 已触发 ${WARN} 项风险警告，请回看上方 ::warning 提示"
+            echo " 本工作流仍会继续执行，但请做好失败与超时的心理准备"
+            echo "================================================================"
+          else
+            echo "参数校验通过，未发现明显风险组合。"
+          fi
+
+      - name: 容器基础准备 (CentOS7)
+        if: ${{ inputs.use_container }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::切换 yum 源到 vault (CentOS7 已 EOL)"
+          # CentOS7 已于 2024-06 EOL，官方 mirrorlist 失效，必须指向 vault
+          sed -i -e 's|^mirrorlist=|#mirrorlist=|g' \
+            -e 's|^#baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=http://vault.centos.org/centos/7|g' \
+            /etc/yum.repos.d/CentOS-*.repo || true
+          sed -i 's|^mirrorlist|#mirrorlist|g; s|^#\?baseurl=.*|baseurl=http://vault.centos.org/centos/7/os/$basearch/|g' \
+            /etc/yum.repos.d/CentOS-Base.repo || true
+          yum clean all || true
+          echo "::endgroup::"
+
+          echo "::group::安装容器基础工具"
+          yum install -y git which tar xz wget ca-certificates || true
+          echo "::endgroup::"
+
+      # =======================================================================
+      # 1. 检出仓库（需要脚本文件）
+      # =======================================================================
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # =======================================================================
+      # 2. 打印编译机器硬件资源
+      # =======================================================================
+      - name: 打印编译主机硬件信息 (Linux/macOS/容器)
+        if: inputs.os != 'windows'
+        shell: bash
+        run: |
+          mkdir -p host-info
+          bash .github/scripts/print-host-info.sh host-info/host-info.txt
+
+      - name: 激活 MSVC 环境 (Windows)
+        if: ${{ inputs.os == 'windows' && startsWith(inputs.compiler, 'msvc') }}
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ inputs.arch == 'arm64' && 'arm64' || 'x64' }}
+          toolset: ${{ inputs.compiler == 'msvc2019' && '14.29' || '' }}
+
+      - name: 打印编译主机硬件信息 (Windows)
+        if: inputs.os == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path host-info | Out-Null
+          pwsh -NoProfile -File .github/scripts/print-host-info.ps1 -OutFile host-info/host-info.txt
+
+      # =======================================================================
+      # 3. 安装系统依赖
+      # =======================================================================
+      - name: 安装依赖 (Ubuntu)
+        if: ${{ inputs.os == 'linux' && !inputs.use_container }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::apt install"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build ccache perl python3 \
+            libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev \
+            libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev \
+            libxrender-dev libxcb1-dev 'libxcb*-dev' libxcb-xkb-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb-xinput-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libssl-dev libdbus-1-dev \
+            libvulkan-dev glslc spirv-headers \
+            libwayland-dev libwayland-egl-backend-dev \
+            libpq-dev zlib1g-dev libpng-dev \
+            pkg-config bison flex gperf \
+            libpcre2-dev libsqlite3-dev
+          echo "::endgroup::"
+
+          # 按需安装指定版本的 gcc / clang
+          case "${{ inputs.compiler }}" in
+            gcc)
+              echo "使用系统默认 gcc: $(gcc --version | head -n1)";;
+            clang)
+              sudo apt-get install -y clang lld
+              echo "clang: $(clang --version | head -n1)";;
+          esac
+
+      - name: 安装依赖 (CentOS7 容器)
+        if: ${{ inputs.use_container }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::yum install (CentOS7 + SCL)"
+          yum install -y centos-release-scl || true
+          # SCL 源指向 vault
+          sed -i 's|^mirrorlist=|#mirrorlist=|g; s|^#\?baseurl=.*|baseurl=http://vault.centos.org/centos/7/sclo/$basearch/sclo/|g' \
+            /etc/yum.repos.d/CentOS-SCLo-scl*.repo 2>/dev/null || true
+          yum clean all || true
+
+          yum install -y "${{ inputs.devtoolset }}" \
+            make cmake3 perl python3 which \
+            mesa-libGL-devel mesa-libEGL-devel \
+            libxcb-devel xcb-util-devel xcb-util-image-devel xcb-util-keysyms-devel \
+            xcb-util-renderutil-devel xcb-util-wm-devel \
+            libX11-devel libXrender-devel libXi-devel libXext-devel \
+            libXfixes-devel libXrandr-devel libXcursor-devel libXinerama-devel \
+            libXcomposite-devel libdrm-devel \
+            libxkbcommon-devel libxkbcommon-x11-devel \
+            fontconfig-devel libffi-devel sqlite-devel \
+            bison flex pcre2-devel openssl-devel \
+            postgresql-devel \
+            libdbusmenu-devel
+          echo "devtoolset: ${{ inputs.devtoolset }} 安装完成"
+          echo ""
+          echo "说明：CentOS7 无法安装 libwayland-devel（base 源缺失），"
+          echo "      因此本线固定关闭 Wayland；libpng 使用源码内置版本。"
+          echo "::endgroup::"
+
+      - name: 安装依赖 (macOS)
+        if: inputs.os == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install ccache ninja pkg-config libpq 2>/dev/null || true
+          # Qt5/macOS 常见依赖
+          brew install freetype fontconfig 2>/dev/null || true
+
+      - name: 安装依赖 (Windows)
+        if: inputs.os == 'windows'
+        shell: pwsh
+        run: |
+          Write-Host "编译器环境:"
+          Get-Command cl.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          if (Get-Command cl.exe -ErrorAction SilentlyContinue) { cl 2>&1 | Select-Object -First 2 }
+          # ccache / ninja（choco 已预装在 windows-2022 上，失败也不阻塞）
+          choco install ccache ninja -y --no-progress 2>$null | Out-Null
+          if (Get-Command ccache -ErrorAction SilentlyContinue) { ccache --version | Select-Object -First 1 } else { Write-Host "ccache 未安装（可选）" }
+
+      # =======================================================================
+      # 4. 下载并解包 Qt 源码（带缓存）
+      # =======================================================================
+      - name: 确定源码 URL
+        id: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ inputs.qt_version }}"
+          # 主次版本，例如 5.15.17 -> 5.15
+          MM=$(echo "$VER" | cut -d. -f1,2)
+
+          # ------------------------------------------------------------------
+          # 源码包命名规则（经验证，各版本命名不统一，需分支处理）：
+          #
+          #   qt-everywhere（完整包）    -> single/  目录
+          #     5.15.3+ : qt-everywhere-opensource-src-<VER>.tar.xz
+          #     <=5.15.2: qt-everywhere-src-<VER>.tar.xz   （无 opensource）
+          #
+          #   qtbase（仅核心库）          -> submodules/ 目录
+          #     Qt6     : qtbase-everywhere-src-<VER>.tar.xz
+          #     Qt5.15.16+ : qtbase-everywhere-opensource-src-<VER>.tar.xz
+          #     Qt5 更早 : 可能不存在，需回退到 everywhere 后只编 qtbase 子目录
+          # ------------------------------------------------------------------
+          CANDIDATES=()
+
+          if [[ "${{ inputs.source_package }}" == "qtbase" ]]; then
+            # 命名不统一：Qt6 无 opensource；Qt5.15.16+ 带 opensource；Qt5 早期又不带
+            for STYLE in "qtbase-everywhere-src" "qtbase-everywhere-opensource-src"; do
+              FILE="${STYLE}-${VER}.tar.xz"
+              for M in "https://mirrors.tuna.tsinghua.edu.cn/qt/archive/qt" \
+                       "https://mirrors.ustc.edu.cn/qtproject/archive/qt" \
+                       "https://mirrors.aliyun.com/qt/archive/qt" \
+                       "https://download.qt.io/archive/qt"; do
+                CANDIDATES+=("${M}/${MM}/${VER}/submodules/${FILE}")
+              done
+            done
+          else
+            # 两套命名都试
+            for STYLE in "qt-everywhere-opensource-src" "qt-everywhere-src"; do
+              FILE="${STYLE}-${VER}.tar.xz"
+              for M in "https://mirrors.tuna.tsinghua.edu.cn/qt/archive/qt" \
+                       "https://mirrors.ustc.edu.cn/qtproject/archive/qt" \
+                       "https://mirrors.aliyun.com/qt/archive/qt" \
+                       "https://download.qt.io/archive/qt"; do
+                CANDIDATES+=("${M}/${MM}/${VER}/single/${FILE}")
+              done
+            done
+          fi
+
+
+          {
+            echo "urls<<EOF"
+            for u in "${CANDIDATES[@]}"; do echo "$u"; done
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+          echo "候选下载地址:"
+          for u in "${CANDIDATES[@]}"; do echo "  $u"; done
+
+      - name: 缓存源码包
+        id: src-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.qt-src-cache
+          key: qt-src-${{ inputs.source_package }}-${{ inputs.qt_version }}
+
+      - name: 下载源码
+        id: download
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qt-src-cache
+
+          CACHE=""
+          # 候选 URL 中可能包含两种命名，逐个尝试，命中即用其文件名作为缓存名
+          while IFS= read -r URL; do
+            [[ -z "$URL" ]] && continue
+            CAND_NAME="$(basename "$URL")"
+            CAND_CACHE=".qt-src-cache/$CAND_NAME"
+
+            if [[ -f "$CAND_CACHE" ]]; then
+              echo "命中缓存: $CAND_CACHE ($(du -h "$CAND_CACHE" | cut -f1))"
+              CACHE="$CAND_CACHE"
+              break
+            fi
+
+            echo "尝试: $URL"
+            if curl -fL --retry 3 --connect-timeout 30 -o "$CAND_CACHE.part" "$URL"; then
+              mv "$CAND_CACHE.part" "$CAND_CACHE"
+              echo "下载成功: $CAND_NAME ($(du -h "$CAND_CACHE" | cut -f1))"
+              CACHE="$CAND_CACHE"
+              break
+            fi
+            rm -f "$CAND_CACHE.part"
+            echo "  -> 该地址不可用，尝试下一个"
+          done <<< "${{ steps.src.outputs.urls }}"
+
+          if [[ -z "$CACHE" ]]; then
+            echo "::error::所有候选地址均下载失败。请确认版本 ${{ inputs.qt_version }} 是否存在，或该版本是否在镜像上可用。"
+            exit 1
+          fi
+
+          echo "解包中: $CACHE"
+          mkdir -p qt-src
+          tar -xJf "$CACHE" -C qt-src
+          echo "解包结果:"
+          ls -d qt-src/*/
+
+          # 自动探测真实解包目录名（命名规则不统一，不能靠猜）
+          REAL_DIR="$(find qt-src -maxdepth 1 -mindepth 1 -type d | head -n1)"
+          if [[ -z "$REAL_DIR" ]]; then
+            echo "::error::解包后未找到任何目录"
+            exit 1
+          fi
+          REAL_DIR_NAME="$(basename "$REAL_DIR")"
+          echo "解包目录名: $REAL_DIR_NAME"
+          echo "pkg_dir=$REAL_DIR_NAME" >> $GITHUB_OUTPUT
+
+      # =======================================================================
+      # 5. 生成 configure 参数
+      # =======================================================================
+      - name: 生成 configure 参数 (Linux/macOS)
+        id: genargs-unix
+        if: inputs.os != 'windows'
+        shell: bash
+        run: |
+          export QT_PREFIX="$RUNNER_TEMP/qtinstall/${{ inputs.qt_version }}-${{ inputs.compiler }}-${{ inputs.build_type }}"
+          bash .github/scripts/gen-configure-args.sh
+
+      - name: 生成 configure 参数 (Windows)
+        id: genargs-win
+        if: inputs.os == 'windows'
+        shell: pwsh
+        run: |
+          $env:QT_PREFIX = "$env:RUNNER_TEMP\qtinstall\${{ inputs.qt_version }}-${{ inputs.compiler }}-${{ inputs.build_type }}"
+          pwsh -NoProfile -File .github/scripts/gen-configure-args.ps1
+
+      # =======================================================================
+      # 6. 编译
+      # =======================================================================
+      - name: ccache 缓存恢复 (Linux/macOS)
+        if: ${{ inputs.os != 'windows' && inputs.use_ccache }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ inputs.os }}-${{ inputs.compiler }}-${{ inputs.qt_version }}-${{ inputs.linux_flavor }}-wl${{ inputs.enable_wayland }}-png${{ inputs.use_system_png }}-${{ hashFiles('.github/scripts/*') }}
+          restore-keys: |
+            ccache-${{ inputs.os }}-${{ inputs.compiler }}-${{ inputs.qt_version }}-
+            ccache-${{ inputs.os }}-${{ inputs.compiler }}-
+
+      - name: 编译 (Linux/macOS)
+        id: build
+        if: inputs.os != 'windows'
+        shell: bash
+        env:
+          QT_SRC_DIR: ${{ github.workspace }}/qt-src/${{ steps.download.outputs.pkg_dir }}
+          QT_BUILD_DIR: ${{ github.workspace }}/build
+          QT_CONFIGURE_ARGS: ${{ steps.genargs-unix.outputs.configure_args }}
+          QT_PREFIX: ${{ steps.genargs-unix.outputs.prefix }}
+          QT_MAJOR: ${{ inputs.qt_major }}
+          QT_PLATFORM: ${{ inputs.os }}-${{ inputs.compiler }}
+          QT_LINUX_FLAVOR: ${{ inputs.linux_flavor }}
+          QT_ENABLE_WAYLAND: ${{ inputs.enable_wayland }}
+          QT_SOURCE_PACKAGE: ${{ inputs.source_package }}
+        run: |
+          # CentOS7 容器内需要先启用 devtoolset
+          if [[ "${{ inputs.use_container }}" == "true" ]]; then
+            echo "启用 ${{ inputs.devtoolset }} ..."
+            scl enable ${{ inputs.devtoolset }} -- bash .github/scripts/build-qt.sh
+          else
+            bash .github/scripts/build-qt.sh
+          fi
+
+      - name: 编译 (Windows)
+        id: build-win
+        if: inputs.os == 'windows'
+        shell: pwsh
+        env:
+          QT_SRC_DIR: ${{ github.workspace }}\qt-src\${{ steps.download.outputs.pkg_dir }}
+          QT_BUILD_DIR: ${{ github.workspace }}\build
+          QT_CONFIGURE_ARGS: ${{ steps.genargs-win.outputs.configure_args }}
+          QT_PREFIX: ${{ steps.genargs-win.outputs.prefix }}
+        run: |
+          pwsh -NoProfile -File .github/scripts/build-qt.ps1
+
+      - name: ccache 统计 (Linux/macOS)
+        if: ${{ inputs.os != 'windows' && inputs.use_ccache && always() }}
+        shell: bash
+        run: ccache --show-stats || true
+
+      # =======================================================================
+      # 7. 打包
+      # =======================================================================
+      - name: 计算产物名
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 平台后缀，CentOS7 场景加上 glibc 标识
+          SUFFIX="${{ inputs.compiler }}"
+          if [[ "${{ inputs.os }}" == "linux" && "${{ inputs.use_container }}" == "true" ]]; then
+            SUFFIX="${SUFFIX}-glibc217"
+          fi
+          if [[ "${{ inputs.os }}" == "linux" && "${{ inputs.qt_major }}" == "5" ]]; then
+            # 区分 Linux Qt5 老系统线 / 新系统线
+            if [[ "${{ inputs.use_container }}" == "true" || "${{ inputs.linux_flavor }}" == "legacy" ]]; then
+              SUFFIX="${SUFFIX}-legacy"
+            else
+              SUFFIX="${SUFFIX}-modern"
+            fi
+          fi
+          if [[ "${{ inputs.arch }}" == "arm64" ]]; then
+            SUFFIX="${SUFFIX}-arm64"
+          fi
+          if [[ "${{ inputs.static_build }}" == "true" ]]; then
+            SUFFIX="${SUFFIX}-static"
+          fi
+          NAME="Qt-${{ inputs.qt_version }}-${{ inputs.os }}-${SUFFIX}-${{ inputs.build_type }}"
+          echo "artifact_name=$NAME" >> $GITHUB_OUTPUT
+          echo "产物名: $NAME"
+
+      - name: 打包 (Linux/macOS)
+        id: pkg-unix
+        if: inputs.os != 'windows'
+        shell: bash
+        env:
+          QT_PREFIX: ${{ steps.genargs-unix.outputs.prefix }}
+          QT_VERSION: ${{ inputs.qt_version }}
+          QT_PLATFORM: ${{ inputs.os }}-${{ inputs.compiler }}
+          QT_BUILD_TYPE: ${{ inputs.build_type }}
+          QT_SOURCE_PACKAGE: ${{ inputs.source_package }}
+          QT_PACK_MODE: ${{ inputs.pack_mode }}
+          QT_OUTPUT_DIR: ${{ github.workspace }}/dist
+          QT_ARTIFACT_NAME: ${{ steps.meta.outputs.artifact_name }}
+          QT_CONFIGURE_ARGS: ${{ steps.genargs-unix.outputs.configure_args }}
+          QT_BUILD_SECONDS: ${{ steps.build.outputs.build_seconds || '0' }}
+          QT_LINUX_FLAVOR: ${{ inputs.linux_flavor }}
+          QT_ENABLE_WAYLAND: ${{ inputs.enable_wayland }}
+        run: bash .github/scripts/package-qt.sh
+
+      - name: 打包 (Windows)
+        id: pkg-win
+        if: inputs.os == 'windows'
+        shell: pwsh
+        env:
+          QT_PREFIX: ${{ steps.genargs-win.outputs.prefix }}
+          QT_VERSION: ${{ inputs.qt_version }}
+          QT_PLATFORM: ${{ inputs.os }}-${{ inputs.compiler }}
+          QT_BUILD_TYPE: ${{ inputs.build_type }}
+          QT_SOURCE_PACKAGE: ${{ inputs.source_package }}
+          QT_PACK_MODE: ${{ inputs.pack_mode }}
+          QT_OUTPUT_DIR: ${{ github.workspace }}\dist
+          QT_ARTIFACT_NAME: ${{ steps.meta.outputs.artifact_name }}
+          QT_CONFIGURE_ARGS: ${{ steps.genargs-win.outputs.configure_args }}
+          QT_BUILD_SECONDS: ${{ steps.build-win.outputs.build_seconds || '0' }}
+        run: |
+          pwsh -NoProfile -File .github/scripts/package-qt.ps1
+
+      # =======================================================================
+      # 8. 上传构建产物（Actions artifact，永久保留 90 天，作为 Release 之外的备份）
+      # =======================================================================
+      - name: 上传 Actions Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: |
+            dist/*.tar.xz
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+            dist/BUILD-INFO.txt
+          retention-days: 30
+          compression-level: 0   # 已经是压缩包，不再二次压缩
+
+      # =======================================================================
+      # 9. 发布到 Release
+      # =======================================================================
+      - name: 生成 Release Tag
+        id: tag
+        if: inputs.create_release
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.release_tag }}"
+          if [[ -z "$TAG" ]]; then
+            TAG="qt${{ inputs.qt_major }}-${{ inputs.qt_version }}-${{ inputs.os }}-${{ inputs.compiler }}-${{ inputs.build_type }}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Release tag: $TAG"
+
+      - name: 发布 Release
+        if: inputs.create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Qt ${{ inputs.qt_version }} (${{ inputs.os }}/${{ inputs.compiler }}/${{ inputs.build_type }})"
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: false
+          body: |
+            ## Qt ${{ inputs.qt_version }} 编译产物
+
+            | 项目 | 值 |
+            |---|---|
+            | 版本 | ${{ inputs.qt_version }} |
+            | 目标系统 | ${{ inputs.os }} |
+            | 编译器 | ${{ inputs.compiler }} |
+            | 架构 | ${{ inputs.arch }} |
+            | 构建类型 | ${{ inputs.build_type }} |
+            | 源码粒度 | ${{ inputs.source_package }} |
+            | 静态构建 | ${{ inputs.static_build }} |
+            | 打包模式 | ${{ inputs.pack_mode }} |
+            | 跳过模块 | ${{ inputs.skip_modules }} |
+            | Linux 线 | ${{ inputs.os == 'linux' && inputs.linux_flavor || '-' }} |
+            | Wayland | ${{ inputs.os == 'linux' && inputs.enable_wayland || '-' }} |
+            | 系统 libpng | ${{ inputs.os == 'linux' && inputs.use_system_png || '-' }} |
+
+            **configure 参数**
+            ```
+            ${{ steps.genargs-unix.outputs.configure_args }}${{ steps.genargs-win.outputs.configure_args }}
+            ```
+
+            构建工作流: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          files: |
+            dist/*.tar.xz
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+            dist/BUILD-INFO.txt
+          fail_on_unmatched_files: false
+          make_latest: false
+
+      # =======================================================================
+      # 10. 最终摘要
+      # =======================================================================
+      - name: 构建摘要
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Qt ${{ inputs.qt_version }} 编译完成"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "|---|---|"
+            echo "| 产物名 | \`${{ steps.meta.outputs.artifact_name }}\` |"
+            echo "| 平台 | ${{ inputs.os }} / ${{ inputs.compiler }} |"
+            echo "| 构建类型 | ${{ inputs.build_type }} |"
+            echo "| 编译耗时 | ${{ steps.build.outputs.build_seconds || steps.build-win.outputs.build_seconds || 0 }} 秒 |"
+            echo "| Release | ${{ inputs.create_release }} (\`${{ steps.tag.outputs.tag }}\`) |"
+          } >> $GITHUB_STEP_SUMMARY

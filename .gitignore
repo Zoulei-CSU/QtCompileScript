@@ -1,0 +1,64 @@
+# ===== WorkBuddy / AI 助手工作目录（不上传）=====
+.workbuddy/
+
+# ===== 系统回收站（沙箱/桌面环境自动生成，非项目文件）=====
+.Trash-*/
+.Trash-*/*
+
+# ===== 临时目录（AI / 本地调试用，不入库）=====
+tmp/
+
+# ===== 编译产物 =====
+build/
+build-*/
+install/
+out/
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.pdb
+*.ilk
+*.exp
+
+# ===== 打包产物 =====
+*.tar
+*.tar.gz
+*.tar.xz
+*.tgz
+*.zip
+*.7z
+*.7z.*
+SHA256SUMS.txt
+BUILD-INFO.txt
+
+# ===== Qt 源码包（体积巨大，不入库）=====
+qt-everywhere-src-*
+qt-everywhere-opensource-src-*
+qtbase-everywhere-src-*
+*.tar.xz
+!docs/**/*.tar.xz
+
+# ===== ccache 缓存 =====
+.ccache/
+ccache-*/
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 日志 =====
+*.log
+logs/
