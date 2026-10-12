@@ -192,17 +192,16 @@ if [[ -n "$SUMMARY_FILE" ]]; then
         _check_yes "xcb" "xcb" || true
         # Wayland（modern 线才要求）
         #   ⚠️ Qt6 的 wayland 是 qtbase 里的 PUBLIC feature，且 **没有** 被
-        #   qt_configure_add_summary_entry 登记进 config.summary —— 直接 grep
-        #   会永远报"缺失"（假警报）。真正的判据是「平台插件是否产出」，
-        #   那要等编译完；这里退而求其次，只在能查到摘要条目时校验，
-        #   查不到就如实说明"无法从 summary 判定"，不当成失败。
+        #   qt_configure_add_summary_entry 登记进 config.summary。config.summary
+        #   里出现的 "wayland" 字样属于别的栏目（如 "Qt Wayland" 标题或注释），
+        #   并不代表 feature 启用 —— 所以**不能在 configure 后用 summary 判定**，
+        #   那样只会产生假警报（实测：grep 命中了 summary 里的 wayland 字样，
+        #   随后 _check_yes 找不到 "enabled: yes" 行 → 误报 [缺失]）。
+        #   正确判据是「平台插件 libqwayland*.so 是否真的产出」，那是编译后的事，
+        #   放到本脚本 install 之后统一核验（见下方 "Wayland 平台插件核验"）。
         if [[ "${QT_ENABLE_WAYLAND:-}" == "true" ]]; then
-            if grep -qiE 'wayland' "$SUMMARY_FILE"; then
-                _check_yes "Wayland" "Wayland" || true
-            else
-                log "  [略]   Wayland（Qt6 不把该 feature 写入 config.summary，"
-                log "         改由编译后的 plugins/platforms/libqwayland-*.so 佐证）"
-            fi
+            log "  [略]   Wayland（不在 config.summary 判定，改由 install 后的"
+            log "         plugins/platforms/libqwayland*.so 核验）"
         fi
     fi
 
@@ -251,6 +250,25 @@ START_TS=$(date +%s)
 "$BUILD_TOOL" install 2>&1 | tee install.log
 INSTALL_SEC=$(( $(date +%s) - START_TS ))
 log "安装完成，耗时 ${INSTALL_SEC}s"
+
+# ---------------------------------------------------------------------------
+# 编译后核验：Wayland 平台插件是否真的产出
+#   这是 Wayland feature 的**唯一可靠判据**（config.summary 判定不了，见上）。
+#   仅 modern 线（QT_ENABLE_WAYLAND=true）检查；缺失只告警不中断。
+# ---------------------------------------------------------------------------
+if [[ "$QT_PLATFORM" == linux-* || -n "${QT_LINUX_FLAVOR:-}" ]]; then
+    if [[ "${QT_ENABLE_WAYLAND:-}" == "true" ]]; then
+        WL_PLUGINS=$(find "$QT_PREFIX/plugins/platforms" -maxdepth 1 -name 'libqwayland*.so' 2>/dev/null | wc -l)
+        if [[ "$WL_PLUGINS" -gt 0 ]]; then
+            log "Wayland 平台插件核验通过：plugins/platforms/ 下发现 ${WL_PLUGINS} 个 libqwayland*.so"
+            find "$QT_PREFIX/plugins/platforms" -maxdepth 1 -name 'libqwayland*.so' 2>/dev/null | sed 's/^/    /'
+        else
+            warn "Wayland 平台插件核验**未通过**：plugins/platforms/ 下没有 libqwayland*.so。"
+            warn "  说明本次构建实际未编出 Wayland 平台插件（请检查 libwayland-dev 等依赖是否装成功，"
+            warn "  或 configure 里 -feature-wayland 是否真的生效）。产物仍会继续打包上传。"
+        fi
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # ccache 统计
