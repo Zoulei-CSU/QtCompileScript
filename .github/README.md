@@ -201,3 +201,27 @@ QT_PREFIX="$HOME/Qt/5.15.17" bash .github/scripts/gen-configure-args.sh
 7. **全量 qt-everywhere 耗时接近上限**：4 核 runner 上 2–5 小时，接近 6 小时
    job 上限；单个 job 上限设为 350 分钟，为上传产物预留约 10 分钟。
    Windows 的 msvc/mingw 全量构建尤其容易触顶，请优先评估。
+8. **`-openssl-linked` 会让产物硬依赖 OpenSSL 动态库**，而产包里**不含**这些库。
+   实测（Qt 6.8.3 / Windows / msvc2022）：`bin/Qt6Network.dll` 的导入表里直接写着
+   `libssl-3-x64.dll`、`libcrypto-3-x64.dll`。也就是说目标机必须自行部署
+   OpenSSL 3 x64，否则程序启动即报缺少 DLL。
+   若不想有硬依赖，可改用 `-openssl-runtime`（运行时动态加载，仍需 DLL，但不是硬导入）。
+
+## 九、产物验证方法
+
+编译成功 ≠ 特性生效。例如 `-openssl-linked` 在找不到 OpenSSL 时 Qt6 不会报错，
+只会静默降级。要确认某个特性**真的**编进去了，直接读产物二进制的导入表：
+
+```bash
+# Windows 产物：解析 PE Import Directory
+python3 .github/scripts/verify-linked-libs.py dist/Qt-6.8.3-windows-msvc2022-release.zip \
+    --find openssl,psql
+
+# Linux 产物：解析 ELF DT_NEEDED（结果与 readelf -d 一致）
+python3 .github/scripts/verify-linked-libs.py dist/Qt-5.15.17-linux-gcc-release.tar.xz \
+    --find openssl,psql,wayland,fontconfig
+```
+
+输入可以是单个 `.dll`/`.so`、已解压的安装目录、`.zip` 或 `.tar.xz`；
+全部关键词命中返回 0，有缺失返回 1（便于在 CI 里当断言用）。
+同一脚本也以技能形式存在：`qt-configure-args-validation`。
