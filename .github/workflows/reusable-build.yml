@@ -569,6 +569,22 @@ jobs:
           echo "pkg_dir=$REAL_DIR_NAME" >> $GITHUB_OUTPUT
 
       # =======================================================================
+      # 4.5 源码补丁：qtscript 在 -ltcg(-flto) 下的链接失败
+      #     Qt 官方 bug QTBUG-42989（标记为「不修」）。cti_vm_throw 等函数由
+      #     全局内联汇编写成、只被汇编引用，LTO 会当作死代码丢弃 →
+      #     「undefined reference to cti_vm_throw」。
+      #     业界做法：给声明加 __attribute__((used)) 强制保留符号。
+      #     仅在启用了 -ltcg 且源码包含 qtscript 时才实际改动（脚本内自动判定）。
+      # =======================================================================
+      - name: 打补丁 qtscript LTO (Linux/macOS)
+        id: patch-qtscript
+        if: inputs.os != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .github/scripts/patch-qtscript-lto.sh "${{ steps.download.outputs.pkg_dir }}"
+
+      # =======================================================================
       # 5. 生成 configure 参数
       # =======================================================================
       - name: 生成 configure 参数 (Linux/macOS)
