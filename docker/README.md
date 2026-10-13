@@ -400,6 +400,40 @@ gcc --version
 GCC_TOOLSET=gcc-toolset-12 ./build.sh legacy
 ```
 
+### Q9：Qt6 的 `configure` 停在 `Configuring submodule 'qttools'` 后报 CMake Error
+
+典型报错：
+
+```
+CMake Error at /usr/lib/llvm-14/lib/cmake/clang/ClangTargets.cmake:750 (message):
+  The imported target "clangBasic" references the file
+     "/usr/lib/llvm-14/lib/libclangBasic.a"
+  but this file does not exist.
+```
+
+根因：**系统里有 clang 的 CMake config，却没有对应的静态库**（config 与库不配套）。
+Qt6 的 `qttools` 会 `qt_find_package(WrapLibClang 8)`（非 `MARK_OPTIONAL`），
+`find_package(Clang CONFIG)` 一旦命中悬空的 config 就会 `FATAL_ERROR`。
+
+本仓库的 `Dockerfile.modern` **已经装了 `libclang-dev`**，正常不会遇到。
+若你手工基于 bare `ubuntu:22.04` 起镜像，补装即可：
+
+```bash
+sudo apt-get update && sudo apt-get install -y libclang-dev
+```
+
+自检是否配套（本仓库镜像构建期会做同一件事）：
+
+```bash
+t=$(find /usr/lib/cmake /usr/lib/llvm-* -name ClangTargets.cmake 2>/dev/null | head -1)
+p=$(dirname "$(dirname "$(dirname "$(dirname "$t")")")")   # 该文件位于 <prefix>/lib/cmake/clang/
+ls "$p/lib/libclangBasic.a" && echo "配套 OK" || echo "悬空：需要 libclang-dev"
+```
+
+> 注：**老系统线（`Dockerfile.legacy` / AlmaLinux 8）不需要**这个包 ——
+> 那里根本没装 clang，`find_package(Clang)` 直接 not found，qttools 只会告警并
+> 关掉 qdoc，不会失败。
+
 ---
 
 ## 八、与 CI 的关系

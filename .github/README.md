@@ -101,6 +101,34 @@ Linux 编译按「系统新旧」分流，入口工作流已把差异固化，�
 构建完成后会解析 `config.summary` 核对上述硬需求是否真的启用了，
 未满足的项会以 `::warning` 列出（不中断构建）。
 
+### 三·补充、Ubuntu runner 的「悬空 ClangConfig」陷阱（已修，勿删 `libclang-dev`）
+
+Qt6 的 `qttools` 会 `qt_find_package(WrapLibClang 8)`（**不是** `MARK_OPTIONAL`），
+内部走 `find_package(Clang CONFIG)`。而 GitHub 的 `ubuntu-22.04` 镜像**预装 clang-14
+编译器**，随之带来：
+
+```
+/usr/lib/cmake/clang-14/ClangConfig.cmake          ← 有
+/usr/lib/llvm-14/lib/cmake/clang/ClangTargets.cmake ← 有
+/usr/lib/llvm-14/lib/libclangBasic.a                ← 没有！（在 libclang-14-dev 里）
+```
+
+于是 CMake 找到 config → `include(ClangTargets.cmake)` → 在「imported target
+`clangBasic` 引用的文件不存在」处直接 `FATAL_ERROR`，**configure 当场死掉**
+（现象：日志停在 `-- Configuring submodule 'qttools'` 之后）。这就是 CI run
+`38329189861` 失败的原因。
+
+修法（Qt 官方文档推荐）：在「安装依赖 (Ubuntu)」里补装 **`libclang-dev`**
+（不带版本号的 meta 包，自动跟随镜像里的 clang 版本），让被引用的静态库落地。
+工作流随后还有一段**自检**：读出 `ClangTargets.cmake` 里的 `_IMPORT_PREFIX`，
+核对 `libclangBasic.a` 真实存在，缺失时发 `::warning`——这样镜像日后升级
+clang 主版本导致同样悬空时，日志里能一眼看到，不必再靠猜。
+
+> ⚠️ **别删 `libclang-dev`**。删掉就会重现上面的 `FATAL_ERROR`。
+> 老系统容器线（AlmaLinux 8）与 legacy Docker 镜像里**没有** clang，
+> `find_package(Clang)` 直接 not found → qttools 只是告警并关闭 qdoc，
+> 不受此陷阱影响，故那两处**无需**该包。
+
 ---
 
 ## 四、风险提示（工作流会主动警告）

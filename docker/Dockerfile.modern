@@ -47,8 +47,13 @@ RUN set -eux; \
     apt-get update -qq; \
     \
     # ---- 必需依赖：缺失会直接导致 Qt configure 失败 ----
+    #   libclang-dev：Qt6 qttools 会 qt_find_package(WrapLibClang 8)（非 MARK_OPTIONAL），
+    #     其 find_package(Clang CONFIG) 若命中镜像里「只有 config、没有静态库」的半套
+    #     clang 安装，会在 ClangTargets.cmake 处 FATAL_ERROR（CI run 38329189861 即此）。
+    #     装 libclang-dev 让 libclangBasic.a 等落地，二者配套。
     apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build ccache perl python3 \
+        libclang-dev \
         libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev \
         libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev \
         libxrender-dev libxcb1-dev 'libxcb*-dev' libxcb-xkb-dev \
@@ -132,6 +137,18 @@ RUN set -eux; \
     if pkg-config --exists libpng || pkg-config --exists libpng16; then echo "  libpng  OK"; else _bad="$_bad libpng"; fi; \
     if pkg-config --exists xcb || pkg-config --exists xcb-1; then echo "  xcb  OK"; else _bad="$_bad xcb"; fi; \
     if [ -n "$_bad" ]; then echo "::ERROR:: 缺少开发库:$_bad"; exit 1; fi; \
+    echo "=== libclang 一致性自检（config 与静态库必须配套）==="; \
+    _ct=""; \
+    for t in /usr/lib/cmake/clang-*/ClangTargets.cmake /usr/lib/llvm-*/lib/cmake/clang/ClangTargets.cmake; do \
+        [ -f "$t" ] && _ct="$t" && break; \
+    done; \
+    if [ -n "$_ct" ]; then \
+        _base="$(sed -n 's/^[[:space:]]*set(_IMPORT_PREFIX[[:space:]]*"\(.*\)").*/\1/p' "$_ct" | grep -m1 . || true)"; \
+        [ -n "$_base" ] || _base="$(dirname "$_ct")"; \
+        _prefix="$_base"; for _ in 1 2 3; do _prefix="$(dirname "$_prefix")"; done; \
+        if [ -f "$_prefix/lib/libclangBasic.a" ]; then echo "  libclang OK: $_ct (prefix=$_prefix)"; \
+        else echo "::ERROR:: libclang 配置悬空: $_ct 期望的 $_prefix/lib/libclangBasic.a 不存在"; exit 1; fi; \
+    else echo "  未发现 ClangTargets.cmake（qttools 将跳过 libclang，仅告警）"; fi; \
     echo "=== 基础镜像信息 ==="; \
     grep -E '^(NAME|VERSION)=' /etc/os-release; \
     ldd --version | head -n1

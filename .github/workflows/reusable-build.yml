@@ -340,8 +340,22 @@ jobs:
           # ---------------------------------------------------------------
           # 必需依赖：缺失会直接导致 configure 失败
           # ---------------------------------------------------------------
+          # 注意 libclang-dev（见下方「悬空 ClangConfig」说明）：
+          #   GitHub 的 ubuntu-22.04 镜像**预装**了 clang-14 编译器，并随之
+          #   提供了 /usr/lib/cmake/clang-14/ClangConfig.cmake 与
+          #   /usr/lib/llvm-14/lib/cmake/clang/ClangTargets.cmake，
+          #   但**不含**这些 config 所引用的静态库（libclangBasic.a 等）。
+          #   Qt6 的 qttools/configure.cmake 会 `qt_find_package(WrapLibClang 8)`
+          #   （注意：非 MARK_OPTIONAL），其内部 `find_package(Clang CONFIG)`
+          #   一旦命中上面的 ClangConfig.cmake，就会 include ClangTargets.cmake
+          #   并在「imported target clangBasic 引用的文件不存在」处 **FATAL_ERROR**，
+          #   直接把 configure 打死（run 38329189861 即此原因）。
+          #   这是 Ubuntu/GitHub runner 的经典陷阱：config 在、库不在，二者不配套。
+          #   修法（Qt 官方文档推荐的解法）：补装 libclang-dev，让被引用的库落地。
+          #   用不带版本号的 meta 包，自动跟随镜像里的 clang 版本，避免写死 -14。
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build ccache perl python3 \
+            libclang-dev \
             libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev \
             libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev \
             libxrender-dev libxcb1-dev 'libxcb*-dev' libxcb-xkb-dev \
@@ -352,6 +366,51 @@ jobs:
             libpq-dev zlib1g-dev libpng-dev \
             pkg-config bison flex gperf \
             libpcre2-dev libsqlite3-dev
+          echo "::endgroup::"
+
+          # ---------------------------------------------------------------
+          # 自检：确认 libclang 的 CMake config 与静态库「配套」
+          #   光装 libclang-dev 还不够保险 —— 若镜像日后把 clang 主版本抬到 15/16
+          #   而 ClangConfig.cmake 仍指向旧路径，同样的悬空错误会重现。
+          #   这里主动校验：凡找到的 ClangTargets.cmake，其 libclangBasic 必须真实存在。
+          #
+          #   ⚠ 不要去「猜」路径（dirname 上溯 N 层很容易算错，两种布局层数不同）。
+          #   直接读文件里 CMake 自己写的 _IMPORT_PREFIX —— 这是 CMake 生成时
+          #   记录的真实前缀，等价于 configure 时的判定，绝不会与 CMake 不一致。
+          #   ClangTargets.cmake 头部形如：
+          #     set(_IMPORT_PREFIX ".../lib/cmake/clang")
+          #     get_filename_component(_IMPORT_PREFIX "${_IMPORT_PREFIX}" PATH)  # ×3
+          #   3 次上溯后 _IMPORT_PREFIX = <前缀>，库在 <前缀>/lib/libclangBasic.a
+          #   （其中第一次 get_filename_component 是去掉文件名本身，后 2 次数"目录层"，
+          #    连同最后一次 PATH 共 3 行——故从文件所在目录再上溯 3 层即得前缀。）
+          #
+          #   只报警不阻塞：缺了顶多 qdoc/clangcpp 关闭，Qt 主体不受影响。
+          # ---------------------------------------------------------------
+          echo "::group::自检 libclang CMake config 一致性"
+          found_any=0
+          shopt -s nullglob
+          roots=(/usr/lib/cmake)
+          for d in /usr/lib/llvm-*; do
+            [[ -d "$d" ]] && roots+=("$d")
+          done
+          shopt -u nullglob
+          while IFS= read -r tgt; do
+            found_any=1
+            # 从文件里抽 _IMPORT_PREFIX 的初始值（第一条 set(...)），再按 CMake 的
+            # 规则上溯 3 层；若抽不到就退回"文件所在目录上溯 3 层"。
+            base="$(sed -n 's/^[[:space:]]*set(_IMPORT_PREFIX[[:space:]]*"\(.*\)").*/\1/p' "$tgt" | grep -m1 . || true)"
+            if [[ -z "$base" ]]; then base="$(dirname "$tgt")"; fi
+            prefix="$base"; for _ in 1 2 3; do prefix="$(dirname "$prefix")"; done
+            if [[ -f "$prefix/lib/libclangBasic.a" ]]; then
+              echo "[OK] libclang config 与静态库配套: $tgt (prefix=$prefix)"
+            else
+              echo "::warning title=libclang 配置悬空::$tgt 期望的 $prefix/lib/libclangBasic.a 不存在，"\
+          "configure 可能在 qttools 处 FATAL_ERROR"
+            fi
+          done < <(find "${roots[@]}" -name ClangTargets.cmake 2>/dev/null)
+          if [[ $found_any -eq 0 ]]; then
+            echo "未发现 ClangTargets.cmake —— qttools 会直接跳过 libclang（仅告警，不致命）"
+          fi
           echo "::endgroup::"
 
           # ---------------------------------------------------------------
