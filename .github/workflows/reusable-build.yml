@@ -801,6 +801,10 @@ jobs:
           QT_ARTIFACT_NAME: ${{ steps.meta.outputs.artifact_name }}
           QT_CONFIGURE_ARGS: ${{ steps.genargs-win.outputs.configure_args }}
           QT_BUILD_SECONDS: ${{ steps.build-win.outputs.build_seconds || '0' }}
+          # 三方运行库 DLL 目录：由「探测 Windows 三方依赖」步骤提供，
+          # 打包时收进产物 3rdparty/，让产物自带 OpenSSL / PostgreSQL 运行库。
+          QT_OPENSSL_BINDIR: ${{ steps.deps-win.outputs.openssl_bindir }}
+          QT_PSQL_BINDIR: ${{ steps.deps-win.outputs.psql_bindir }}
         run: |
           pwsh -NoProfile -File .github/scripts/package-qt.ps1
 

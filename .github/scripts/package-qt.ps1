@@ -132,6 +132,75 @@ $memGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemor
 ) | Out-File -FilePath $buildInfo -Encoding utf8
 
 # ---------------------------------------------------------------------------
+# 收集三方运行库 DLL -> $QT_PREFIX\3rdparty
+#   为什么：本产物是「开发包 + 运行包」合一。Qt 链接的 OpenSSL / PostgreSQL
+#   运行库不在包内（它们来自 runner 预装目录），用户拿到产物后若没有这两个
+#   依赖的运行库，程序启动会缺 DLL。这里把探测到的 DLL 一并收进 3rdparty/，
+#   让产物自带运行库（按 Qt 官方 Windows 部署习惯，DLL 与 exe 同级即可被找到）。
+#
+#   输入（来自 detect-win-deps 步骤，经 env 传入；缺失则跳过该库）：
+#     QT_OPENSSL_BINDIR / QT_PSQL_BINDIR
+# ---------------------------------------------------------------------------
+$opensslBin = Get-EnvOr "QT_OPENSSL_BINDIR" ""
+$psqlBin    = Get-EnvOr "QT_PSQL_BINDIR" ""
+
+$thirdDir = Join-Path $QT_PREFIX "3rdparty"
+$collected = New-Object System.Collections.Generic.List[string]
+
+function Copy-DepDlls {
+    param(
+        [string]$SrcDir,
+        [string]$Pattern,       # 正则，匹配文件名
+        [string]$Note
+    )
+    if ([string]::IsNullOrWhiteSpace($SrcDir)) {
+        Write-Warn2 "$Note：未提供 DLL 目录（探测阶段未找到），跳过"
+        return
+    }
+    if (-not (Test-Path $SrcDir)) {
+        Write-Warn2 "$Note：DLL 目录不存在：$SrcDir，跳过"
+        return
+    }
+    if (-not (Test-Path $thirdDir)) { New-Item -ItemType Directory -Path $thirdDir -Force | Out-Null }
+    $files = Get-ChildItem -Path $SrcDir -Filter "*.dll" -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $Pattern }
+    if (-not $files) {
+        Write-Warn2 "$Note：在 $SrcDir 未找到匹配 $Pattern 的 DLL，跳过"
+        return
+    }
+    foreach ($f in $files) {
+        Copy-Item -Force $f.FullName (Join-Path $thirdDir $f.Name)
+        $collected.Add($f.Name)
+        Write-Log "已收进 3rdparty: $($f.Name)  <- $($f.FullName)"
+    }
+}
+
+Write-Log "收集三方运行库 DLL -> $thirdDir"
+# OpenSSL 3：libcrypto-3-x64.dll / libssl-3-x64.dll（也兼容 1.1 的 libcrypto-1_1-x64.dll 等）
+Copy-DepDlls -SrcDir $opensslBin -Pattern '^(lib)?(ssl|crypto)' -Note "OpenSSL"
+# PostgreSQL：libpq.dll（连带其依赖 intl/iconv 类 DLL 也一起收，避免缺链）
+Copy-DepDlls -SrcDir $psqlBin -Pattern '^(libpq|libintl|libiconv|libwinpthread)' -Note "PostgreSQL"
+
+if ($collected.Count -gt 0) {
+    Write-Log "3rdparty 共收进 $($collected.Count) 个 DLL"
+    # 附一份说明，写明 DLL 来源，便于溯源
+    @(
+        "===== 3rdparty / 三方运行库 DLL ====="
+        "本目录包含 Qt 链接的第三方运行库（OpenSSL / PostgreSQL）。"
+        "部署时请把本目录下所有 DLL 复制到你的 .exe 同级目录（或用时加入 PATH）。"
+        ""
+        "OpenSSL 来源目录 : $opensslBin"
+        "PostgreSQL 来源目录: $psqlBin"
+        ""
+        "文件清单:"
+        $collected | ForEach-Object { "  - $_" }
+    ) | Out-File -FilePath (Join-Path $thirdDir "README-3rdparty.txt") -Encoding utf8
+} else {
+    Write-Warn2 "未收集到任何三方 DLL，产物不含 3rdparty/ 目录"
+    if (Test-Path $thirdDir) { Remove-Item $thirdDir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------------------
 # 打包 zip
 # ---------------------------------------------------------------------------
 $archive = Join-Path $QT_OUTPUT_DIR "$QT_ARTIFACT_NAME.zip"

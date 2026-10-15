@@ -8,7 +8,7 @@
 #   于是 configure 报：
 #       openssl/ssl.h not found in [] and global paths.
 #       ERROR: Feature 'openssl-linked' ... pre-condition '... libs.openssl' failed.
-#   （run 38375939083 <|place_holder_mm_span_0442|> qtdrivers：PostgreSQL 同理，静默变成 no）
+#   （run 38375939083  qtdrivers：PostgreSQL 同理，静默变成 no）
 #
 #   解决：在编译前把这两个依赖的 prefix 探测出来，交给 gen-configure-args.ps1，
 #   由它以 `OPENSSL_PREFIX=... PSQL_PREFIX=...` 赋值形式传给 Qt5 configure。
@@ -17,9 +17,11 @@
 #   openssl_prefix   例：C:\Program Files\OpenSSL
 #   openssl_incdir   例：C:\Program Files\OpenSSL\include
 #   openssl_libdir   例：C:\Program Files\OpenSSL\lib\VC\x64\MD
+#   openssl_bindir   例：C:\Program Files\OpenSSL\bin            （运行库 DLL 目录，打包收进 3rdparty）
 #   psql_prefix      例：C:\Program Files\PostgreSQL\14
 #   psql_incdir      例：C:\Program Files\PostgreSQL\14\include
 #   psql_libdir      例：C:\Program Files\PostgreSQL\14\lib
+#   psql_bindir      例：C:\Program Files\PostgreSQL\14\bin      （运行库 DLL 目录，打包收进 3rdparty）
 #
 # 探测策略：以「真实文件是否存在」为准（ssl.h / ssl.lib / libpq-fe.h / libpq.lib），
 #   逐个候选目录验证，绝不凭空拼路径就当真。
@@ -128,15 +130,29 @@ if ($opensslPrefix) {
     Write-Log "OpenSSL 头文件: $inc"
     if ($libDir) { Write-Log "OpenSSL 库目录: $libDir" } else { Write-Log "::warning::OpenSSL 头文件找到但未定位 ssl.lib/ libssl.lib，libdir 留空" }
 
+    # 运行库 DLL 目录（打包时收进 3rdparty）：OpenSSL 3 的 DLL 在 <prefix>\bin，
+    #   名字形如 libcrypto-3-x64.dll / libssl-3-x64.dll。以「存在 ssl/crypto DLL」为准。
+    $binDir = Join-Path $opensslPrefix "bin"
+    $binOk = $false
+    if (Test-Path $binDir) {
+        $d = Get-ChildItem -Path $binDir -Filter "*.dll" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^(lib)?(ssl|crypto)' } | Select-Object -First 1
+        if ($d) { $binOk = $true }
+    }
+    if ($binOk) { Write-Log "OpenSSL 运行库目录: $binDir" }
+    else { Write-Log "::warning::OpenSSL 未找到 bin 目录下的 ssl/crypto DLL，产物将不含 OpenSSL 运行库" }
+
     # 统一转 8.3 短路径：路径里那个 "Program Files" 的空格是引号地狱的根源。
     Set-Out "openssl_prefix" (Get-ShortPath $opensslPrefix)
     Set-Out "openssl_incdir" (Get-ShortPath $inc)
     Set-Out "openssl_libdir" ($(if ($libDir) { Get-ShortPath $libDir } else { "" }))
+    Set-Out "openssl_bindir" ($(if ($binOk) { Get-ShortPath $binDir } else { "" }))
 } else {
     Write-Log "::warning::未能在候选目录中找到 OpenSSL（include\openssl\ssl.h）。Qt5 configure 的 -openssl-linked 可能失败。"
     Set-Out "openssl_prefix" ""
     Set-Out "openssl_incdir" ""
     Set-Out "openssl_libdir" ""
+    Set-Out "openssl_bindir" ""
 }
 
 # ---------------------------------------------------------------------------
@@ -176,9 +192,13 @@ if ($psqlPrefix -and $psqlLibDir) {
     Set-Out "psql_prefix" (Get-ShortPath $psqlPrefix)
     Set-Out "psql_incdir" (Get-ShortPath (Join-Path $psqlPrefix "include"))
     Set-Out "psql_libdir" (Get-ShortPath $psqlLibDir)
+    # 运行库 DLL 目录（打包时收进 3rdparty）：libpq.dll 在 <prefix>\bin。
+    $pgBin = Join-Path $psqlPrefix "bin"
+    Set-Out "psql_bindir" ($(if (Test-Path (Join-Path $pgBin "libpq.dll")) { Get-ShortPath $pgBin } else { "" }))
 } else {
     Write-Log "::warning::未找到可用的 PostgreSQL（需 include\libpq-fe.h 且 lib\libpq.lib）。本次不构建 QPSQL 驱动。"
     Set-Out "psql_prefix" ""
     Set-Out "psql_incdir" ""
     Set-Out "psql_libdir" ""
+    Set-Out "psql_bindir" ""
 }
