@@ -644,6 +644,21 @@ jobs:
           bash .github/scripts/patch-qtscript-lto.sh "${{ steps.download.outputs.pkg_dir }}"
 
       # =======================================================================
+      # 4.6 探测 Windows 三方依赖（OpenSSL / PostgreSQL）
+      #     Qt6 走 CMake，FindOpenSSL/FindPostgreSQL 会自动找到 runner 上预装的
+      #     C:\Program Files\OpenSSL 与 C:\Program Files\PostgreSQL\<ver>。
+      #     但 Qt5 走 qmake 体系，只认编译器全局搜索路径，不会自动去找，
+      #     于是 configure 报 "openssl/ssl.h not found in [] and global paths."
+      #     并最终失败（run 38375939083），PostgreSQL 则静默变成 no。
+      #     这里在编译前把两者的 prefix 探测出来，交给下一步生成 Qt5 专用参数。
+      # =======================================================================
+      - name: 探测 Windows 三方依赖 (OpenSSL/PostgreSQL)
+        id: deps-win
+        if: inputs.os == 'windows'
+        shell: pwsh
+        run: pwsh -NoProfile -File .github/scripts/detect-win-deps.ps1
+
+      # =======================================================================
       # 5. 生成 configure 参数
       # =======================================================================
       - name: 生成 configure 参数 (Linux/macOS)
@@ -658,6 +673,11 @@ jobs:
         id: genargs-win
         if: inputs.os == 'windows'
         shell: pwsh
+        env:
+          QT_OPENSSL_INCDIR: ${{ steps.deps-win.outputs.openssl_incdir }}
+          QT_OPENSSL_LIBDIR: ${{ steps.deps-win.outputs.openssl_libdir }}
+          QT_PSQL_INCDIR: ${{ steps.deps-win.outputs.psql_incdir }}
+          QT_PSQL_LIBDIR: ${{ steps.deps-win.outputs.psql_libdir }}
         run: |
           $env:QT_PREFIX = "$env:RUNNER_TEMP\qtinstall\${{ inputs.qt_version }}-${{ inputs.compiler }}-${{ inputs.build_type }}"
           pwsh -NoProfile -File .github/scripts/gen-configure-args.ps1
